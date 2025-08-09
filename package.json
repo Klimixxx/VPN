@@ -1,1 +1,14 @@
-{"name":"ss-miniapp-backend"}
+{
+  "name": "ss-miniapp-backend",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "base64url": "^3.0.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
