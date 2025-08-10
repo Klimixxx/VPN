@@ -183,6 +183,18 @@ app.get('/api/ping', (req, res) => {
   res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN });
 });
 
+// ... все твои маршруты /api/healthz, /api/me, /api/sub/* и т.д.
+
+// Кто я? Проверка, что initData валиден и читается
+app.get('/api/whoami', (req, res) => {
+  try {
+    const u = getUserFromInitData(req.query.initData || '');
+    res.json({ ok: true, user: u });
+  } catch (e) {
+    res.status(401).json({ ok: false, error: 'initData verification failed' });
+  }
+});
+
 // ---- JSON 404 вместо HTML
 app.use((req, res) => {
   res.status(404).json({ error: 'not_found', path: req.path, method: req.method });
@@ -193,15 +205,7 @@ app.use((err, req, res, next) => {
   console.error('Unhandled error:', err?.stack || err);
   res.status(500).json({ error: 'server_error' });
 });
-// ===== Старт
+
 const PORT = process.env.PORT || 3000;
-// Кто я? Проверка, что initData валиден и читается
-app.get('/api/whoami', (req, res) => {
-  try {
-    const u = getUserFromInitData(req.query.initData || '');
-    res.json({ ok: true, user: u });
-  } catch (e) {
-    res.status(401).json({ ok: false, error: 'initData verification failed' });
-  }
-});
 app.listen(PORT, () => console.log('API listening on', PORT));
+
