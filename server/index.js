@@ -1,117 +1,201 @@
-// server/index.js
-import express from 'express';
-import crypto from 'crypto';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import base64url from 'base64url';
+// index.js — бэкенд для Telegram miniapp VPN (Express + CORS + подписки)
 
-dotenv.config();
+const express = require('express');
+const crypto  = require('crypto');
+const cors    = require('cors');
 
 const app = express();
 app.use(express.json());
 
-// CORS
-const WEB_ORIGIN = process.env.WEB_ORIGIN || '*';
-app.use(cors({ origin: WEB_ORIGIN === '*' ? true : WEB_ORIGIN, credentials: true }));
+// ===== CORS (для отладки разрешаем всех; позже можно сузить до домена фронта)
+app.use(cors({ origin: true, credentials: false }));
 
-// ENV
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const SERVER_HOST = process.env.SERVER_HOST;
-const SERVER_PORT = parseInt(process.env.SERVER_PORT || '8388', 10);
-const SS_METHOD = process.env.SS_METHOD || 'aes-256-gcm';
-const SS_PASSWORD_GLOBAL = process.env.SS_PASSWORD_GLOBAL || '';
-const SUBSCRIBE_BASE = process.env.SUBSCRIBE_BASE || '';
+// ===== Конфиг Shadowsocks из ENV
+const SERVER_HOST    = process.env.SERVER_HOST || '195.133.40.43';
+const SERVER_PORT    = Number(process.env.SERVER_PORT || '8388');
+const SS_METHOD      = process.env.SS_METHOD || 'aes-256-gcm';
+const SS_PASS        = process.env.SS_PASSWORD_GLOBAL || 'changeme';
+const SUBSCRIBE_BASE = process.env.SUBSCRIBE_BASE || `https://vpn-1x0l.onrender.com/subscribe`;
 
-// Простое хранилище в памяти
-const users = new Map(); // telegram_user_id -> { password, port, method }
+// ===== Проверка Telegram initData
+// https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+function checkTelegramAuth(initData) {
+  const token = process.env.BOT_TOKEN;
+  if (!token) throw new Error('BOT_TOKEN is not set');
 
-function verifyTelegramInitData(initData) {
-  // https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
-  const urlSearchParams = new URLSearchParams(initData);
-  const data = [];
-  for (const [key, value] of urlSearchParams.entries()) {
-    if (key === 'hash') continue;
-    data.push(`${key}=${value}`);
+  const secret = crypto.createHash('sha256').update(token).digest();
+  const params = new URLSearchParams(initData || '');
+  const hash = params.get('hash');
+  params.delete('hash');
+
+  const dataCheckString = [...params.entries()]
+    .map(([k, v]) => `${k}=${v}`)
+    .sort()
+    .join('\n');
+
+  const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
+  if (hmac !== hash) return null;
+
+  const out = Object.fromEntries(params.entries());
+  if (out.user) { try { out.user = JSON.parse(out.user); } catch {} }
+  else { out.user = { id: Number(out.id), username: out.username }; }
+  return out;
+}
+
+function getUserFromInitData(initData) {
+  const data = checkTelegramAuth(initData);
+  if (!data || !data.user || typeof data.user.id === 'undefined') {
+    throw new Error('initData verification failed');
   }
-  data.sort();
-  const dataCheckString = data.join('\n');
-  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN || '').digest();
-  const hash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-  const passedHash = urlSearchParams.get('hash');
-  return hash === passedHash;
+  return data.user; // { id, username, ... }
 }
 
-function getOrCreateUser(telegramId) {
-  if (!users.has(telegramId)) {
-    const password = SS_PASSWORD_GLOBAL && SS_PASSWORD_GLOBAL.trim()
-      ? SS_PASSWORD_GLOBAL.trim()
-      : crypto.randomBytes(12).toString('base64url');
-    const port = SERVER_PORT;
-    users.set(telegramId, { password, port, method: SS_METHOD });
-  }
-  return users.get(telegramId);
+// ===== Утилиты Shadowsocks
+function buildSsUri(host, port, method, password, label = 'Shadowsocks') {
+  const userinfo = `${method}:${password}@${host}:${port}`;
+  const b64 = Buffer.from(userinfo, 'utf8').toString('base64');
+  return `ss://${b64}#${encodeURIComponent(label)}`;
 }
 
-function buildSSURI({ method, password, host, port, tag }) {
-  // ss://base64("method:password@host:port")#TAG
-  const main = `${method}:${password}@${host}:${port}`;
-  const b64 = Buffer.from(main, 'utf8').toString('base64').replace(/=+$/,'');
-  return `ss://${b64}#${encodeURIComponent(tag)}`;
-}
+// ===== Health
+app.get('/api/healthz', (req, res) => res.json({ ok: true }));
 
-app.get('/api/healthz', (_req, res) => res.json({ ok: true }));
-
+// ===== Основной эндпойнт для мини-аппа (данные узла)
 app.get('/api/me', (req, res) => {
-  const initData = req.query.initData;
-  if (!initData || !verifyTelegramInitData(initData)) {
-    return res.status(401).json({ error: 'initData verification failed' });
+  try {
+    const { initData } = req.query;
+    const user = getUserFromInitData(initData);
+
+    const ssUri = buildSsUri(SERVER_HOST, SERVER_PORT, SS_METHOD, SS_PASS, 'VPN');
+    const subscribeUrl = SUBSCRIBE_BASE;
+
+    res.json({
+      user:   { id: user.id, username: user.username || null },
+      server: { host: SERVER_HOST, port: SERVER_PORT, method: SS_METHOD },
+      password: SS_PASS,
+      ssUri,
+      subscribeUrl,
+    });
+  } catch (e) {
+    res.status(401).json({ error: 'initData verification failed' });
   }
-  const tgData = Object.fromEntries(new URLSearchParams(initData));
-  const user = JSON.parse(tgData.user);
-  const telegramId = String(user.id);
-
-  const record = getOrCreateUser(telegramId);
-  const ssUri = buildSSURI({
-    method: record.method,
-    password: record.password,
-    host: SERVER_HOST,
-    port: record.port,
-    tag: `TG_${telegramId}`
-  });
-
-  const subscribeUrl = `${SUBSCRIBE_BASE}?u=${base64url.encode(telegramId)}`;
-
-  res.json({
-    telegramId,
-    server: { host: SERVER_HOST, port: record.port, method: record.method },
-    password: record.password,
-    ssUri,
-    subscribeUrl
-  });
 });
 
-// SIP008 subscription
+// ===== SIP008 подписка (JSON), для импорта в клиенты
+// https://github.com/shadowsocks/shadowsocks-org/wiki/SIP008-Online-Configuration-Delivery
 app.get('/subscribe', (req, res) => {
-  const uidRaw = req.query.u;
-  if (!uidRaw) return res.status(400).json({ error: 'missing u' });
-  const telegramId = base64url.decode(String(uidRaw));
-  const record = users.get(telegramId);
-  if (!record) return res.status(404).json({ error: 'user not found' });
-
-  const payload = {
+  res.json({
     version: 1,
-    servers: [{
-      server: SERVER_HOST,
-      server_port: record.port,
-      method: record.method,
-      password: record.password,
-      plugin: '',
-      plugin_opts: ''
-    }]
-  };
-  res.setHeader('Content-Type', 'application/json');
-  res.send(JSON.stringify(payload));
+    servers: [
+      { server: SERVER_HOST, server_port: SERVER_PORT, method: SS_METHOD, password: SS_PASS }
+    ],
+  });
 });
 
-const PORT = process.env.PORT || 8080;
+// ===== Подписки (демо-хранилище в памяти процесса)
+// На проде заменить на БД (Postgres/Redis и т. п.)
+const subs = new Map(); // key: telegram user id -> { active, until: ISOString }
+
+function addDays(d, n)   { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function addMonths(d, n) { const x = new Date(d); x.setMonth(x.getMonth() + n); return x; }
+function planToUntil(plan) {
+  const now = new Date();
+  if (plan === '7d')  return addDays(now, 7);
+  if (plan === '1m')  return addMonths(now, 1);
+  if (plan === '3m')  return addMonths(now, 3);
+  if (plan === '6m')  return addMonths(now, 6);
+  if (plan === '12m') return addMonths(now, 12);
+  return null;
+}
+
+// ---- статус подписки
+app.get('/api/sub/me', (req, res) => {
+  try {
+    const { initData } = req.query;
+    const user = getUserFromInitData(initData || '');
+    const cur = subs.get(user.id);
+    const active = !!(cur && cur.until && new Date(cur.until) > new Date());
+    res.json({ active, until: active ? cur.until : null });
+  } catch (e) {
+    console.error('sub/me error:', e?.message || e);
+    res.status(401).json({ error: 'initData verification failed' });
+  }
+});
+
+// ---- активировать подписку (POST)
+app.post('/api/sub/activateMe', (req, res) => {
+  try {
+    const { initData, plan } = req.query; // фронт шлёт через query
+    const user  = getUserFromInitData(initData || '');
+    const until = planToUntil(plan);
+    if (!until) return res.status(400).json({ error: 'invalid plan' });
+    const payload = { active: true, until: until.toISOString() };
+    subs.set(user.id, payload);
+    res.json(payload);
+  } catch (e) {
+    console.error('activateMe error:', e?.message || e);
+    res.status(401).json({ error: 'initData verification failed' });
+  }
+});
+
+// ---- (временная помощь для отладки) зеркала через GET
+app.get('/api/sub/activateMe', (req, res) => {
+  try {
+    const { initData, plan } = req.query;
+    const user  = getUserFromInitData(initData || '');
+    const until = planToUntil(plan);
+    if (!until) return res.status(400).json({ error: 'invalid plan' });
+    const payload = { active: true, until: until.toISOString() };
+    subs.set(user.id, payload);
+    res.json(payload);
+  } catch (e) {
+    console.error('activateMe[GET] error:', e?.message || e);
+    res.status(401).json({ error: 'initData verification failed' });
+  }
+});
+
+// ---- отменить подписку (POST)
+app.post('/api/sub/cancelMe', (req, res) => {
+  try {
+    const { initData } = req.query;
+    const user = getUserFromInitData(initData || '');
+    subs.delete(user.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('cancelMe error:', e?.message || e);
+    res.status(401).json({ error: 'initData verification failed' });
+  }
+});
+
+// ---- (временная помощь для отладки) зеркало через GET
+app.get('/api/sub/cancelMe', (req, res) => {
+  try {
+    const { initData } = req.query;
+    const user = getUserFromInitData(initData || '');
+    subs.delete(user.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('cancelMe[GET] error:', e?.message || e);
+    res.status(401).json({ error: 'initData verification failed' });
+  }
+});
+
+// ---- ping для самотеста
+app.get('/api/ping', (req, res) => {
+  res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN });
+});
+
+// ---- JSON 404 вместо HTML (чтобы не было "Cannot GET ...")
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found', path: req.path, method: req.method });
+});
+
+// ---- Глобальный обработчик ошибок → JSON + лог
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err?.stack || err);
+  res.status(500).json({ error: 'server_error' });
+});
+
+// ===== Старт
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('API listening on', PORT));
