@@ -1,13 +1,13 @@
-// index.js — бэкенд для Telegram miniapp VPN (Express + CORS + подписки)
+// server/index.js — бэкенд для Telegram miniapp VPN (Express + CORS + подписки) — ESM
 
-const express = require('express');
-const crypto  = require('crypto');
-const cors    = require('cors');
+import express from 'express';
+import crypto from 'node:crypto';
+import cors from 'cors';
 
 const app = express();
 app.use(express.json());
 
-// ===== CORS (для отладки разрешаем всех; позже можно сузить до домена фронта)
+// ===== CORS (для отладки — пускаем всех; позже сузишь до домена фронта)
 app.use(cors({ origin: true, credentials: false }));
 
 // ===== Конфиг Shadowsocks из ENV
@@ -37,8 +37,8 @@ function checkTelegramAuth(initData) {
   if (hmac !== hash) return null;
 
   const out = Object.fromEntries(params.entries());
-  if (out.user) { try { out.user = JSON.parse(out.user); } catch {} }
-  else { out.user = { id: Number(out.id), username: out.username }; }
+  if (out.user) { try { out.user = JSON.parse(out.user); } catch {}
+  } else { out.user = { id: Number(out.id), username: out.username }; }
   return out;
 }
 
@@ -60,28 +60,26 @@ function buildSsUri(host, port, method, password, label = 'Shadowsocks') {
 // ===== Health
 app.get('/api/healthz', (req, res) => res.json({ ok: true }));
 
-// ===== Основной эндпойнт для мини-аппа (данные узла)
+// ===== Данные для мини-аппа
 app.get('/api/me', (req, res) => {
   try {
     const { initData } = req.query;
     const user = getUserFromInitData(initData);
 
     const ssUri = buildSsUri(SERVER_HOST, SERVER_PORT, SS_METHOD, SS_PASS, 'VPN');
-    const subscribeUrl = SUBSCRIBE_BASE;
-
     res.json({
       user:   { id: user.id, username: user.username || null },
       server: { host: SERVER_HOST, port: SERVER_PORT, method: SS_METHOD },
       password: SS_PASS,
       ssUri,
-      subscribeUrl,
+      subscribeUrl: SUBSCRIBE_BASE,
     });
   } catch (e) {
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
 
-// ===== SIP008 подписка (JSON), для импорта в клиенты
+// ===== SIP008 подписка (JSON) — для импорта в клиенты
 // https://github.com/shadowsocks/shadowsocks-org/wiki/SIP008-Online-Configuration-Delivery
 app.get('/subscribe', (req, res) => {
   res.json({
@@ -93,11 +91,11 @@ app.get('/subscribe', (req, res) => {
 });
 
 // ===== Подписки (демо-хранилище в памяти процесса)
-// На проде заменить на БД (Postgres/Redis и т. п.)
+// На проде заменить на БД
 const subs = new Map(); // key: telegram user id -> { active, until: ISOString }
 
-function addDays(d, n)   { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
-function addMonths(d, n) { const x = new Date(d); x.setMonth(x.getMonth() + n); return x; }
+const addDays   = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const addMonths = (d, n) => { const x = new Date(d); x.setMonth(x.getMonth() + n); return x; };
 function planToUntil(plan) {
   const now = new Date();
   if (plan === '7d')  return addDays(now, 7);
@@ -138,7 +136,7 @@ app.post('/api/sub/activateMe', (req, res) => {
   }
 });
 
-// ---- (временная помощь для отладки) зеркала через GET
+// ---- (удобно для проверки из браузера) зеркала через GET
 app.get('/api/sub/activateMe', (req, res) => {
   try {
     const { initData, plan } = req.query;
@@ -167,7 +165,7 @@ app.post('/api/sub/cancelMe', (req, res) => {
   }
 });
 
-// ---- (временная помощь для отладки) зеркало через GET
+// ---- (зеркало для браузера) GET
 app.get('/api/sub/cancelMe', (req, res) => {
   try {
     const { initData } = req.query;
@@ -185,7 +183,7 @@ app.get('/api/ping', (req, res) => {
   res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN });
 });
 
-// ---- JSON 404 вместо HTML (чтобы не было "Cannot GET ...")
+// ---- JSON 404 вместо HTML
 app.use((req, res) => {
   res.status(404).json({ error: 'not_found', path: req.path, method: req.method });
 });
