@@ -7,7 +7,7 @@ const cors    = require('cors');
 const app = express();
 app.use(express.json());
 
-// ===== CORS (на время отладки — разрешаем всех; потом можно сузить до домена Vercel)
+// ===== CORS (для отладки разрешаем всех; позже можно сузить до домена фронта)
 app.use(cors({ origin: true, credentials: false }));
 
 // ===== Конфиг Shadowsocks из ENV
@@ -60,26 +60,28 @@ function buildSsUri(host, port, method, password, label = 'Shadowsocks') {
 // ===== Health
 app.get('/api/healthz', (req, res) => res.json({ ok: true }));
 
-// ===== Данные для мини-аппа
+// ===== Основной эндпойнт для мини-аппа (данные узла)
 app.get('/api/me', (req, res) => {
   try {
     const { initData } = req.query;
     const user = getUserFromInitData(initData);
 
     const ssUri = buildSsUri(SERVER_HOST, SERVER_PORT, SS_METHOD, SS_PASS, 'VPN');
+    const subscribeUrl = SUBSCRIBE_BASE;
+
     res.json({
       user:   { id: user.id, username: user.username || null },
       server: { host: SERVER_HOST, port: SERVER_PORT, method: SS_METHOD },
       password: SS_PASS,
       ssUri,
-      subscribeUrl: SUBSCRIBE_BASE,
+      subscribeUrl,
     });
   } catch (e) {
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
 
-// ===== SIP008 подписка (JSON) — для импорта в клиенты
+// ===== SIP008 подписка (JSON), для импорта в клиенты
 // https://github.com/shadowsocks/shadowsocks-org/wiki/SIP008-Online-Configuration-Delivery
 app.get('/subscribe', (req, res) => {
   res.json({
@@ -183,7 +185,7 @@ app.get('/api/ping', (req, res) => {
   res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN });
 });
 
-// ---- JSON 404 вместо HTML
+// ---- JSON 404 вместо HTML (чтобы не было "Cannot GET ...")
 app.use((req, res) => {
   res.status(404).json({ error: 'not_found', path: req.path, method: req.method });
 });
