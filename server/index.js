@@ -193,6 +193,8 @@ app.use((err, req, res, next) => {
   console.error('Unhandled error:', err?.stack || err);
   res.status(500).json({ error: 'server_error' });
 });
+// ===== Старт
+const PORT = process.env.PORT || 3000;
 // Кто я? Проверка, что initData валиден и читается
 app.get('/api/whoami', (req, res) => {
   try {
@@ -202,7 +204,4 @@ app.get('/api/whoami', (req, res) => {
     res.status(401).json({ ok: false, error: 'initData verification failed' });
   }
 });
-
-// ===== Старт
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('API listening on', PORT));
