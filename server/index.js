@@ -25,7 +25,7 @@ function checkTelegramAuth(initData) {
 
   const secret = crypto.createHash('sha256').update(token).digest();
   const params = new URLSearchParams(initData || '');
-  const hash = params.get('hash');
+  const receivedHash = params.get('hash') || '';
   params.delete('hash');
 
   const dataCheckString = [...params.entries()]
@@ -33,14 +33,20 @@ function checkTelegramAuth(initData) {
     .sort()
     .join('\n');
 
-  const hmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
-  if (hmac !== hash) return null;
+  const computedHmac = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
+
+  if (computedHmac !== receivedHash) {
+    console.error('[auth] hash mismatch',
+      { recv: receivedHash.slice(0,8), calc: computedHmac.slice(0,8), len: (initData||'').length });
+    return null;
+  }
 
   const out = Object.fromEntries(params.entries());
-  if (out.user) { try { out.user = JSON.parse(out.user); } catch {}
-  } else { out.user = { id: Number(out.id), username: out.username }; }
+  if (out.user) { try { out.user = JSON.parse(out.user); } catch {} }
+  else { out.user = { id: Number(out.id), username: out.username }; }
   return out;
 }
+
 
 function getUserFromInitData(initData) {
   const data = checkTelegramAuth(initData);
