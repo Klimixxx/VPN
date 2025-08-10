@@ -172,6 +172,9 @@ app.post('/api/sub/cancelMe', (req, res) => {
 
 // ===== Старт сервера
 const PORT = process.env.PORT || 3000;
+app.get('/api/ping', (req, res) => {
+  res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN, origin: process.env.WEB_ORIGIN || null });
+});
 app.listen(PORT, () => {
   console.log('API listening on port', PORT);
 });
