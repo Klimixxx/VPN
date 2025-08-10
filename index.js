@@ -143,20 +143,11 @@ app.get('/api/sub/me', (req, res) => {
 });
 
 // [POST] активировать подписку (демо)
-app.post('/api/sub/activateMe', (req, res) => {
-  try {
-    const { initData, plan } = req.query; // фронт шлёт в query
-    const user = getUserFromInitData(initData);
-    const until = planToUntil(plan);
-    if (!until) return res.status(400).json({ error: 'invalid plan' });
-
-    const payload = { active: true, until: until.toISOString() };
-    subs.set(user.id, payload);
-    res.json(payload);
   } catch (e) {
+    console.error('activateMe error:', e?.message || e); // <= увидишь в Render Logs
     res.status(401).json({ error: 'initData verification failed' });
   }
-});
+
 
 // [POST] отменить подписку (демо)
 app.post('/api/sub/cancelMe', (req, res) => {
