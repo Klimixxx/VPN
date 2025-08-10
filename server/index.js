@@ -214,4 +214,110 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('API listening on', PORT));
+// ====== Telegram Stars (инвойсы) + рефералка (in-memory) ======
+const PLAN_STARS = {
+  '7d':  Number(process.env.STARS_7D  || 20),
+  '1m':  Number(process.env.STARS_1M  || 50),
+  '3m':  Number(process.env.STARS_3M  || 120),
+  '6m':  Number(process.env.STARS_6M  || 200),
+  '12m': Number(process.env.STARS_12M || 350),
+};
+const humanPlan = (p)=> ({'7d':'Неделя','1m':'1 месяц','3m':'3 месяца','6m':'6 месяцев','12m':'1 год'}[p] || p);
+
+// --- простая реф-учётка
+const referrals = new Map(); // childUserId -> refUserId
+const refAgg    = new Map(); // refUserId   -> { invites:Set<number>, amountStars:number }
+
+function linkReferral(childId, refId){
+  if (!refId || childId === refId) return;
+  if (!referrals.has(childId)) {
+    referrals.set(childId, refId);
+    const cur = refAgg.get(refId) || { invites: new Set(), amountStars: 0 };
+    cur.invites.add(childId);
+    refAgg.set(refId, cur);
+  }
+}
+const getReferrer = (childId)=> referrals.get(childId) || null;
+
+// --- поймать стартовый параметр и привязать реферала
+app.get('/api/ref/track', (req, res) => {
+  try {
+    const user = getUserFromInitData(req.query.initData || '');
+    const params = new URLSearchParams(req.query.initData || '');
+    const sp = params.get('start_param') || '';
+    const m = /^ref_(\d+)$/.exec(sp);
+    if (m) linkReferral(user.id, Number(m[1]));
+    res.json({ ok: true, referrer: getReferrer(user.id) });
+  } catch {
+    res.status(401).json({ ok:false, error:'initData verification failed' });
+  }
+});
+
+// --- статы по рефералам для текущего пользователя
+app.get('/api/ref/stats', (req, res) => {
+  try {
+    const user = getUserFromInitData(req.query.initData || '');
+    const agg  = refAgg.get(user.id) || { invites:new Set(), amountStars:0 };
+    res.json({
+      total: (agg.invites?.size || 0),
+      amountStars: agg.amountStars || 0,
+      incomeStars: Math.round((agg.amountStars || 0) * 0.5),
+      invitedIds: Array.from(agg.invites || []),
+      link: `https://t.me/${process.env.BOT_USERNAME || 'tcnm'}?start=ref_${user.id}`
+      // Для прямого запуска мини-аппа можно также: https://t.me/<bot>?startapp=ref_<id>
+    });
+  } catch {
+    res.status(401).json({ ok:false, error:'initData verification failed' });
+  }
+});
+
+// --- создать инвойс в Stars под выбранный план
+app.get('/api/pay/invoice', async (req, res) => {
+  try {
+    const { initData, plan } = req.query;
+    const user   = getUserFromInitData(initData || '');
+    const amount = PLAN_STARS[plan];
+    if (!amount) return res.status(400).json({ error:'invalid plan' });
+
+    const payload = { t:'sub', plan, uid:user.id, ref:getReferrer(user.id) };
+    const body = {
+      title: `VPN • ${humanPlan(plan)}`,
+      description: 'Подписка на доступ к VPN-серверу',
+      payload: JSON.stringify(payload),
+      provider_token: '',                 // обязательно пустая строка для Stars
+      currency: 'XTR',                    // платежи только в Stars
+      prices: [{ label: `VPN ${humanPlan(plan)}`, amount }] // amount = кол-во звёзд
+    };
+
+    const url = `https://api.telegram.org/bot${process.env.BOT_TOKEN}/createInvoiceLink`;
+    const r   = await fetch(url, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
+    const j   = await r.json();
+    if (!j.ok) return res.status(500).json({ error:'tg_error', details:j });
+    res.json({ invoiceLink: j.result, amount });
+  } catch (e) {
+    res.status(500).json({ error:'server_error', message: e?.message || String(e) });
+  }
+});
+
+// --- учёт платежа (после успешного "paid" в мини-аппе)
+app.post('/api/pay/record', (req, res) => {
+  try {
+    const { initData } = req.query;
+    const { plan, amountStars } = req.body || {};
+    if (!plan || !amountStars) return res.status(400).json({ error:'bad_args' });
+    const user = getUserFromInitData(initData || '');
+    const ref  = getReferrer(user.id);
+    if (ref) {
+      const x = refAgg.get(ref) || { invites:new Set(), amountStars:0 };
+      x.invites.add(user.id);
+      x.amountStars += Number(amountStars) || 0;
+      refAgg.set(ref, x);
+    }
+    // Можно здесь же активировать подписку, но у тебя это отдельной ручкой уже сделано
+    res.json({ ok:true });
+  } catch {
+    res.status(401).json({ ok:false, error:'initData verification failed' });
+  }
+});
+
 
