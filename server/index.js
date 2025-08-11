@@ -191,7 +191,33 @@ app.get('/api/ping', (req, res) => {
   res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN });
 });
 
-// ... все твои маршруты /api/healthz, /api/me, /api/sub/* и т.д.
+// ==== TEMP DEBUG (удалить после проверки!) ====
+app.post('/api/_debug_hash', (req, res) => {
+  try {
+    const initData = req.body?.initData || '';
+    const params = new URLSearchParams(initData);
+    const recv = (params.get('hash') || '').slice(0, 8);
+
+    const token = process.env.BOT_TOKEN;
+    const secret = crypto.createHash('sha256').update(token).digest();
+    params.delete('hash');
+    const dataCheckString = [...params.entries()]
+      .map(([k, v]) => `${k}=${v}`)
+      .sort()
+      .join('\n');
+    const calc = crypto.createHmac('sha256', secret)
+      .update(dataCheckString)
+      .digest('hex')
+      .slice(0, 8);
+
+    res.json({ ok: true, len: initData.length, recv, calc });
+  } catch (e) {
+    console.error('[debug_hash]', e);
+    res.status(500).json({ ok:false, error: String(e) });
+  }
+});
+// ==== /TEMP DEBUG ====
+
 
 // Кто я? Проверка, что initData валиден и читается
 app.post('/api/whoami', (req, res) => {
