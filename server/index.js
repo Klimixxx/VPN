@@ -201,19 +201,6 @@ app.get('/api/whoami', (req, res) => {
   }
 });
 
-// ---- JSON 404 вместо HTML
-app.use((req, res) => {
-  res.status(404).json({ error: 'not_found', path: req.path, method: req.method });
-});
-
-// ---- Глобальный обработчик ошибок → JSON + лог
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err?.stack || err);
-  res.status(500).json({ error: 'server_error' });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('API listening on', PORT));
 // ====== Telegram Stars (инвойсы) + рефералка (in-memory) ======
 const PLAN_STARS = {
   '7d':  Number(process.env.STARS_7D  || 20),
@@ -264,7 +251,6 @@ app.get('/api/ref/stats', (req, res) => {
       incomeStars: Math.round((agg.amountStars || 0) * 0.5),
       invitedIds: Array.from(agg.invites || []),
       link: `https://t.me/${process.env.BOT_USERNAME || 'tcnm'}?start=ref_${user.id}`
-      // Для прямого запуска мини-аппа можно также: https://t.me/<bot>?startapp=ref_<id>
     });
   } catch {
     res.status(401).json({ ok:false, error:'initData verification failed' });
@@ -313,6 +299,26 @@ app.post('/api/pay/record', (req, res) => {
       x.amountStars += Number(amountStars) || 0;
       refAgg.set(ref, x);
     }
+    res.json({ ok:true });
+  } catch {
+    res.status(401).json({ ok:false, error:'initData verification failed' });
+  }
+});
+
+// ---- JSON 404 вместо HTML
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found', path: req.path, method: req.method });
+});
+
+// ---- Глобальный обработчик ошибок → JSON + лог
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err?.stack || err);
+  res.status(500).json({ error: 'server_error' });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('API listening on', PORT));
+
     // Можно здесь же активировать подписку, но у тебя это отдельной ручкой уже сделано
     res.json({ ok:true });
   } catch {
