@@ -6,6 +6,8 @@ import cors from 'cors';
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
 
 // ===== CORS (для отладки — пускаем всех; позже сузишь до домена фронта)
 app.use(cors({ origin: true, credentials: false }));
@@ -192,14 +194,16 @@ app.get('/api/ping', (req, res) => {
 // ... все твои маршруты /api/healthz, /api/me, /api/sub/* и т.д.
 
 // Кто я? Проверка, что initData валиден и читается
-app.get('/api/whoami', (req, res) => {
+app.post('/api/whoami', (req, res) => {
   try {
-    const u = getUserFromInitData(req.query.initData || '');
+    const u = getUserFromInitData(req.body?.initData || '');
     res.json({ ok: true, user: u });
   } catch (e) {
+    console.error('[whoami]', e?.message || e);
     res.status(401).json({ ok: false, error: 'initData verification failed' });
   }
 });
+
 
 // ====== Telegram Stars (инвойсы) + рефералка (in-memory) ======
 const PLAN_STARS = {
@@ -242,9 +246,9 @@ app.get('/api/ref/track', (req, res) => {
 });
 
 // --- статы по рефералам для текущего пользователя
-app.get('/api/ref/stats', (req, res) => {
+app.post('/api/ref/stats', (req, res) => {
   try {
-    const user = getUserFromInitData(req.query.initData || '');
+    const user = getUserFromInitData(req.body?.initData || '');
     const agg  = refAgg.get(user.id) || { invites:new Set(), amountStars:0 };
     res.json({
       total: (agg.invites?.size || 0),
@@ -254,18 +258,18 @@ app.get('/api/ref/stats', (req, res) => {
       link: `https://t.me/${process.env.BOT_USERNAME || 'tcnm'}?start=ref_${user.id}`
     });
   } catch (e) {
-    console.error(e);
+    console.error('[ref/stats]', e?.message || e);
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
 
 
+
 // --- создать инвойс в Stars под выбранный план
-app.get('/api/pay/invoice', async (req, res) => {
+app.post('/api/pay/invoice', async (req, res) => {
   try {
-    const { initData, plan } = req.query;
+    const { initData, plan } = req.body || {};
     const user   = getUserFromInitData(initData || '');
-    const amount = PLAN_STARS[plan];
     if (!amount) return res.status(400).json({ error:'invalid plan' });
 
     const payload = { t:'sub', plan, uid:user.id, ref:getReferrer(user.id) };
