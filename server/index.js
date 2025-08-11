@@ -235,7 +235,8 @@ app.get('/api/ref/track', (req, res) => {
     const m = /^ref_(\d+)$/.exec(sp);
     if (m) linkReferral(user.id, Number(m[1]));
     res.json({ ok: true, referrer: getReferrer(user.id) });
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    console.error(e);
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
@@ -252,10 +253,12 @@ app.get('/api/ref/stats', (req, res) => {
       invitedIds: Array.from(agg.invites || []),
       link: `https://t.me/${process.env.BOT_USERNAME || 'tcnm'}?start=ref_${user.id}`
     });
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    console.error(e);
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
+
 
 // --- создать инвойс в Stars под выбранный план
 app.get('/api/pay/invoice', async (req, res) => {
@@ -291,19 +294,24 @@ app.post('/api/pay/record', (req, res) => {
     const { initData } = req.query;
     const { plan, amountStars } = req.body || {};
     if (!plan || !amountStars) return res.status(400).json({ error:'bad_args' });
+
     const user = getUserFromInitData(initData || '');
     const ref  = getReferrer(user.id);
+
     if (ref) {
       const x = refAgg.get(ref) || { invites:new Set(), amountStars:0 };
       x.invites.add(user.id);
       x.amountStars += Number(amountStars) || 0;
       refAgg.set(ref, x);
     }
+
     res.json({ ok:true });
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    console.error(e);
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
+
 
 // ---- JSON 404 вместо HTML
 app.use((req, res) => {
