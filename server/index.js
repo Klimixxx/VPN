@@ -191,10 +191,10 @@ app.get('/api/ping', (req, res) => {
   res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN });
 });
 
-// ==== TEMP DEBUG (удалить после проверки!) ====
-app.post('/api/_debug_hash', (req, res) => {
+// ==== TEMP DEBUG GET (удалить после проверки!) ====
+app.get('/api/_debug_hash', (req, res) => {
   try {
-    const initData = req.body?.initData || '';
+    const initData = req.query?.initData || '';
     const params = new URLSearchParams(initData);
     const recv = (params.get('hash') || '').slice(0, 8);
 
@@ -212,11 +212,12 @@ app.post('/api/_debug_hash', (req, res) => {
 
     res.json({ ok: true, len: initData.length, recv, calc });
   } catch (e) {
-    console.error('[debug_hash]', e);
+    console.error('[debug_hash][GET]', e);
     res.status(500).json({ ok:false, error: String(e) });
   }
 });
-// ==== /TEMP DEBUG ====
+// ==== /TEMP DEBUG GET ====
+
 
 
 // Кто я? Проверка, что initData валиден и читается
