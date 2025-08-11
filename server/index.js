@@ -42,7 +42,7 @@ function checkTelegramAuth(initData) {
   }
 
   const out = Object.fromEntries(params.entries());
-  if (out.user) { try { out.user = JSON.parse(out.user); } catch {} }
+  if (out.user) { try { out.user = JSON.parse(out.user); } catch (e) { console.error(e); } }
   else { out.user = { id: Number(out.id), username: out.username }; }
   return out;
 }
@@ -235,7 +235,7 @@ app.get('/api/ref/track', (req, res) => {
     const m = /^ref_(\d+)$/.exec(sp);
     if (m) linkReferral(user.id, Number(m[1]));
     res.json({ ok: true, referrer: getReferrer(user.id) });
-  } catch {
+  } catch (e) { console.error(e); }
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
@@ -252,7 +252,7 @@ app.get('/api/ref/stats', (req, res) => {
       invitedIds: Array.from(agg.invites || []),
       link: `https://t.me/${process.env.BOT_USERNAME || 'tcnm'}?start=ref_${user.id}`
     });
-  } catch {
+  } catch (e) { console.error(e); }
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
@@ -300,7 +300,7 @@ app.post('/api/pay/record', (req, res) => {
       refAgg.set(ref, x);
     }
     res.json({ ok:true });
-  } catch {
+  } catch (e) { console.error(e); }
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
@@ -321,7 +321,7 @@ app.listen(PORT, () => console.log('API listening on', PORT));
 
     // Можно здесь же активировать подписку, но у тебя это отдельной ручкой уже сделано
     res.json({ ok:true });
-  } catch {
+  } catch (e) { console.error(e); }
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
