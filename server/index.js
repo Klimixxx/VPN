@@ -319,11 +319,5 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('API listening on', PORT));
 
-    // Можно здесь же активировать подписку, но у тебя это отдельной ручкой уже сделано
-    res.json({ ok:true });
-  } catch (e) { console.error(e); }
-    res.status(401).json({ ok:false, error:'initData verification failed' });
-  }
-});
-
+  
 
