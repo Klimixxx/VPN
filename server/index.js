@@ -25,7 +25,8 @@ function checkTelegramAuth(initData) {
   const token = process.env.BOT_TOKEN;
   if (!token) throw new Error('BOT_TOKEN is not set');
 
-  const secret = crypto.createHash('sha256').update(token).digest();
+  // Mini Apps: секрет = HMAC-SHA256(token, key="WebAppData")
+  const secret = crypto.createHmac('sha256', 'WebAppData').update(token).digest();
   const params = new URLSearchParams(initData || '');
   const receivedHash = params.get('hash') || '';
   params.delete('hash');
@@ -199,7 +200,7 @@ app.get('/api/_debug_hash', (req, res) => {
     const recv = (params.get('hash') || '').slice(0, 8);
 
     const token = process.env.BOT_TOKEN;
-    const secret = crypto.createHash('sha256').update(token).digest();
+    const secret = crypto.createHmac('sha256', 'WebAppData').update(token).digest();
     params.delete('hash');
     const dataCheckString = [...params.entries()]
       .map(([k, v]) => `${k}=${v}`)
