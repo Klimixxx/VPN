@@ -582,10 +582,11 @@ app.delete('/admin/servers/:id', requireAdmin, async (req, res) => {
 });
 
 
-// страница админки
-app.get('/admin', (req, res) => {
+// страница админки (доступ только админам)
+app.get('/admin', requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin.html'));
 });
+
 // ---- ping для самотеста
 app.get('/api/ping', (req, res) => {
   res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN });
