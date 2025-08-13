@@ -1,6 +1,7 @@
 // server/index.js — бэкенд для Telegram miniapp VPN (Express + CORS + подписки) — ESM
 
 import express from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import crypto from 'node:crypto';
 import cors from 'cors';
 import path from 'path';
@@ -87,6 +88,18 @@ async function ensureSchema() {
   -- на всякий пожарный: проставим created_at там, где null
   update users    set created_at = now() where created_at is null;
   update payments set created_at = now() where created_at is null;
+
+    -- vless-клиенты (персональные UUID + срок)
+  create table if not exists vless_clients (
+    user_id     bigint primary key,
+    uuid        uuid        not null,
+    expires_at  timestamptz not null,
+    label       text        not null default '',
+    created_at  timestamptz not null default now(),
+    updated_at  timestamptz not null default now()
+  );
+  create index if not exists idx_vless_expires on vless_clients (expires_at);
+
   `);
 }
 
@@ -177,6 +190,12 @@ const SERVER_PORT    = Number(process.env.SERVER_PORT || '8388');
 const SS_METHOD      = process.env.SS_METHOD || 'aes-256-gcm';
 const SS_PASS        = process.env.SS_PASSWORD_GLOBAL || 'changeme';
 const SUBSCRIBE_BASE = process.env.SUBSCRIBE_BASE || `https://vpn-1x0l.onrender.com/subscribe`;
+// ===== Конфиг VLESS REALITY из ENV
+const REALITY_SNI = process.env.REALITY_SNI;   // напр. 'www.cloudflare.com'
+const REALITY_PBK = process.env.REALITY_PBK;   // public key (pbk) из VPS
+const REALITY_SID = process.env.REALITY_SID;   // shortId из VPS
+const SERVER_IP   = process.env.SERVER_IP;     // публичный IP твоего VPS
+
 
 // ===== Проверка Telegram initData
 // https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
@@ -277,6 +296,23 @@ app.get('/api/me', requireNotBlocked, (req, res) => {
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
+function buildVlessUri(uuid, label = 'VLESS') {
+  if (!SERVER_IP || !REALITY_SNI || !REALITY_PBK || !REALITY_SID) {
+    throw new Error('REALITY env is not set');
+  }
+  const q = new URLSearchParams({
+    encryption: 'none',
+    flow: 'xtls-rprx-vision',
+    security: 'reality',
+    sni: REALITY_SNI,
+    pbk: REALITY_PBK,
+    sid: REALITY_SID,
+    type: 'tcp',
+    fp: 'chrome',
+  });
+  return `vless://${uuid}@${SERVER_IP}:443?${q.toString()}#${encodeURIComponent(label)}`;
+}
+
 
 // ===== SIP008 подписка (JSON) — для импорта в клиенты
 // https://github.com/shadowsocks/shadowsocks-org/wiki/SIP008-Online-Configuration-Delivery
@@ -346,6 +382,17 @@ app.get('/api/sub/activateMe', requireNotBlocked, async (req, res) => {
     console.error('[sub/activateMe]', e);
     res.status(401).json({ error: 'initData verification failed' });
   }
+  // === VLESS: завести/продлить персональный UUID на срок подписки
+{
+  const r = await pool.query(`select uuid from vless_clients where user_id = $1`, [user.id]);
+  const id = r.rowCount ? r.rows[0].uuid : uuidv4();
+  await pool.query(`
+    insert into vless_clients (user_id, uuid, expires_at, label)
+    values ($1,$2,$3,$4)
+    on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
+  `, [user.id, id, until, `tg_${user.id}`]);
+}
+
 });
 
 // отменить (делаем неактивной)
@@ -743,6 +790,38 @@ app.post('/api/pay/record',  requireNotBlocked, async (req, res) => {
   }
 });
 
+// ===== Пользовательская VLESS-ссылка (по initData)
+app.get('/api/vpn/link', async (req, res) => {
+  try {
+    const user = getUserFromInitData(req.query.initData || '');
+    const q = await pool.query(
+      'select uuid, expires_at from vless_clients where user_id = $1',
+      [user.id]
+    );
+    if (!q.rowCount || new Date(q.rows[0].expires_at) <= new Date()) {
+      return res.json({ active:false, reason:'expired_or_missing' });
+    }
+    const link = buildVlessUri(q.rows[0].uuid, `tg_${user.id}`);
+    res.json({ active:true, link, expires_at: q.rows[0].expires_at });
+  } catch {
+    res.status(401).json({ active:false, error:'initData verification failed' });
+  }
+});
+// ===== Список активных клиентов для Xray (VPS-синк)
+app.get('/api/vpn/clients', async (req, res) => {
+  try {
+    const secret = req.query.secret || req.get('x-vless-sync') || '';
+    if (secret !== (process.env.VLESS_SYNC_SECRET || '')) return res.sendStatus(403);
+    const rows = (await pool.query(
+      `select uuid::text as id, label as email
+       from vless_clients
+       where expires_at > now()`
+    )).rows;
+    res.json(rows.map(r => ({ id: r.id, flow: 'xtls-rprx-vision', email: r.email })));
+  } catch (e) {
+    res.status(500).json({ error:'server_error' });
+  }
+});
 
 
 
