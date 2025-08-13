@@ -297,6 +297,7 @@ app.post('/api/pay/invoice', async (req, res) => {
   try {
     const { initData, plan } = req.body || {};
     const user   = getUserFromInitData(initData || '');
+    const amount = PLAN_STARS[plan];
     if (!amount) return res.status(400).json({ error:'invalid plan' });
 
     const payload = { t:'sub', plan, uid:user.id, ref:getReferrer(user.id) };
