@@ -18,7 +18,8 @@ const pool = new Pool({
 });
 
 async function ensureSchema() {
-  const sql = `
+  await pool.query(`
+  -- базовые таблицы
   create table if not exists users (
     id            bigint primary key,
     username      text,
@@ -43,36 +44,47 @@ async function ensureSchema() {
 
   create table if not exists subscriptions (
     user_id       bigint primary key,
-    plan          text,                     -- ДОБАВЛЕНО: текущий план ('w','1m','3m','6m','1y' и т.п.)
+    plan          text,
     until         timestamptz not null
   );
 
   create table if not exists blocks (
-    user_id       bigint primary key,       -- заблокированные пользователи
+    user_id       bigint primary key,
     reason        text,
-    until         timestamptz               -- опционально, до какого времени (null = навсегда)
+    until         timestamptz
   );
 
   create table if not exists servers (
     id            bigserial primary key,
-    name          text not null,            -- отображаемое имя
+    name          text not null,
     host          text not null,
     port          integer,
-    proto         text,                     -- например 'v2ray','wireguard','openvpn'
+    proto         text,
     country       text,
     active        boolean default true,
     notes         text,
-    config        jsonb,                    -- произвольный JSON (URI, ключи и т.п.)
+    config        jsonb,
     created_at    timestamptz default now()
   );
 
-  create index if not exists idx_subs_until on subscriptions(until);
+  -- МИГРАЦИИ: добавляем недостающие колонки в уже существующих таблицах
+  alter table if exists users         add column if not exists created_at timestamptz default now();
+  alter table if exists subscriptions add column if not exists plan       text;
+  alter table if exists payments      add column if not exists amount_rub numeric(12,2) default 0;
+  alter table if exists payments      add column if not exists created_at timestamptz default now();
+
+  -- индексы
+  create index if not exists idx_subs_until   on subscriptions(until);
   create index if not exists idx_pays_created on payments(created_at);
   create index if not exists idx_users_created on users(created_at);
-  create index if not exists idx_ref_refid   on referrals(ref_id);
-  `;
-  await pool.query(sql);
+  create index if not exists idx_ref_refid    on referrals(ref_id);
+
+  -- на всякий пожарный: проставим created_at там, где null
+  update users    set created_at = now() where created_at is null;
+  update payments set created_at = now() where created_at is null;
+  `);
 }
+
 
 ensureSchema().catch(e => console.error('ensureSchema', e));
 
