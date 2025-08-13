@@ -246,6 +246,10 @@ const humanPlan = (p)=> ({'7d':'Неделя','1m':'1 месяц','3m':'3 мес
 // --- простая реф-учётка
 const referrals = new Map(); // childUserId -> refUserId
 const refAgg    = new Map(); // refUserId   -> { invites:Set<number>, amountStars:number }
+// профили приглашённых и сумма пополнений каждого
+const profiles        = new Map(); // userId -> { username, photo }
+const refSpendByChild = new Map(); // childId -> amountStars
+
 
 function linkReferral(childId, refId){
   if (!refId || childId === refId) return;
@@ -262,6 +266,8 @@ const getReferrer = (childId)=> referrals.get(childId) || null;
 app.get('/api/ref/track', (req, res) => {
   try {
     const user = getUserFromInitData(req.query.initData || '');
+    const uname = user.username ? '@' + user.username : (user.first_name || 'Пользователь');
+profiles.set(user.id, { username: uname, photo: user.photo_url || null });
     const params = new URLSearchParams(req.query.initData || '');
     const sp = params.get('start_param') || '';
     const m = /^ref_(\d+)$/.exec(sp);
@@ -273,16 +279,32 @@ app.get('/api/ref/track', (req, res) => {
   }
 });
 
-// --- статы по рефералам для текущего пользователя
 app.post('/api/ref/stats', (req, res) => {
   try {
     const user = getUserFromInitData(req.body?.initData || '');
     const agg  = refAgg.get(user.id) || { invites:new Set(), amountStars:0 };
+
+    const invitedIds = Array.from(agg.invites || []);
+    const items = invitedIds.map(id => {
+      const p   = profiles.get(id) || {};
+      const sub = subs.get(id);
+      const active = !!(sub && sub.until && new Date(sub.until) > new Date());
+      return {
+        id,
+        username: p.username || ('@' + id),
+        photo: p.photo || null,
+        amount: refSpendByChild.get(id) || 0,  // СКОЛЬКО звёзд внёс именно этот приглашённый
+        subActive: active,
+        subUntil: active ? sub.until : null
+      };
+    });
+
     res.json({
-      total: (agg.invites?.size || 0),
+      total: invitedIds.length,
       amountStars: agg.amountStars || 0,
       incomeStars: Math.round((agg.amountStars || 0) * 0.5),
-      invitedIds: Array.from(agg.invites || []),
+      items,
+      // ВАЖНО: startapp, чтобы ref попал в initData
       link: `https://t.me/${process.env.BOT_USERNAME || 'tothemoonvpnbot'}?startapp=ref_${user.id}`
     });
   } catch (e) {
@@ -290,6 +312,7 @@ app.post('/api/ref/stats', (req, res) => {
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
+
 
 
 
@@ -326,24 +349,32 @@ app.post('/api/pay/record', (req, res) => {
   try {
     const { initData } = req.query;
     const { plan, amountStars } = req.body || {};
-    if (!plan || !amountStars) return res.status(400).json({ error:'bad_args' });
+
+    const amount = Number(amountStars);
+    if (!plan || !Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'bad_args' });
+    }
 
     const user = getUserFromInitData(initData || '');
     const ref  = getReferrer(user.id);
 
     if (ref) {
-      const x = refAgg.get(ref) || { invites:new Set(), amountStars:0 };
-      x.invites.add(user.id);
-      x.amountStars += Number(amountStars) || 0;
-      refAgg.set(ref, x);
+      const agg = refAgg.get(ref) || { invites: new Set(), amountStars: 0 };
+      agg.invites.add(user.id);
+      agg.amountStars += amount;
+      refAgg.set(ref, agg);
+
+      // сумма пополнений конкретного приглашённого
+      refSpendByChild.set(user.id, (refSpendByChild.get(user.id) || 0) + amount);
     }
 
-    res.json({ ok:true });
+    return res.json({ ok: true });
   } catch (e) {
-    console.error(e);
-    res.status(401).json({ ok:false, error:'initData verification failed' });
+    console.error('[pay/record]', e);
+    return res.status(401).json({ ok: false, error: 'initData verification failed' });
   }
 });
+
 
 
 // ---- JSON 404 вместо HTML
