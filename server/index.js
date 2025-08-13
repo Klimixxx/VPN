@@ -248,20 +248,6 @@ async function requireNotBlocked(req, res, next) {
 }
 
 
-// Продлить/назначить подписку по плану
-function addPlanToDate(plan, base = new Date()) {
-  const d = new Date(Math.max(new Date(base).getTime(), Date.now()));
-  switch (plan) {
-    case 'w':  d.setDate(d.getDate() + 7);  break;
-    case '1m': d.setMonth(d.getMonth() + 1); break;
-    case '3m': d.setMonth(d.getMonth() + 3); break;
-    case '6m': d.setMonth(d.getMonth() + 6); break;
-    case '1y': d.setFullYear(d.getFullYear() + 1); break;
-    default:   d.setMonth(d.getMonth() + 1);
-  }
-  return d;
-}
-
 
 // ===== Утилиты Shadowsocks
 function buildSsUri(host, port, method, password, label = 'Shadowsocks') {
