@@ -8,6 +8,126 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+// === DB (Neon Postgres) ======================================
+import pkg from 'pg';
+const { Pool } = pkg;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }, // для serverless Postgres
+});
+
+// создаём таблицы, если их ещё нет
+async function ensureSchema() {
+  const sql = `
+  create table if not exists users (
+    id            bigint primary key,      -- Telegram user id
+    username      text,
+    photo         text,
+    created_at    timestamptz default now()
+  );
+
+  create table if not exists referrals (
+    child_id      bigint primary key,      -- приглашённый
+    ref_id        bigint not null,         -- кто пригласил
+    created_at    timestamptz default now()
+  );
+
+  create table if not exists payments (
+    id            bigserial primary key,
+    user_id       bigint not null,
+    plan          text,
+    amount_rub    numeric(12,2) default 0,
+    amount_stars  integer default 0,
+    created_at    timestamptz default now()
+  );
+
+  create table if not exists subscriptions (
+    user_id       bigint primary key,
+    until         timestamptz not null
+  );
+
+  create index if not exists payments_user_id_idx on payments(user_id);
+  create index if not exists referrals_ref_id_idx on referrals(ref_id);
+  `;
+  await pool.query(sql);
+}
+ensureSchema().catch(e => console.error('ensureSchema', e));
+
+// маленькие помощники
+async function dbUpsertUser(u) {
+  const username = u.username ? '@' + u.username : (u.first_name || 'Пользователь');
+  const photo    = u.photo_url || null;
+  await pool.query(
+    `insert into users (id, username, photo)
+     values ($1,$2,$3)
+     on conflict (id) do update set username = excluded.username, photo = excluded.photo`,
+    [u.id, username, photo]
+  );
+}
+
+async function dbLinkReferral(childId, refId) {
+  if (!refId || refId === childId) return; // защита от само-реферала
+  await pool.query(
+    `insert into referrals (child_id, ref_id)
+     values ($1,$2)
+     on conflict (child_id) do nothing`,
+    [childId, refId]
+  );
+}
+
+async function dbRecordPayment(userId, plan, amountStars, amountRub) {
+  await pool.query(
+    `insert into payments (user_id, plan, amount_rub, amount_stars)
+     values ($1,$2,$3,$4)`,
+    [userId, plan, amountRub || 0, amountStars || 0]
+  );
+}
+
+// агрегаты по рефералам: total + суммы + список
+async function dbGetRefStats(refId) {
+  const totalRes  = await pool.query(`select count(*)::int as total from referrals where ref_id = $1`, [refId]);
+
+  const sumRes    = await pool.query(`
+    select coalesce(sum(p.amount_rub),0)::numeric as amount_rub
+    from referrals r
+    left join payments p on p.user_id = r.child_id
+    where r.ref_id = $1
+  `, [refId]);
+
+  const itemsRes  = await pool.query(`
+    select
+      u.id,
+      u.username,
+      u.photo,
+      coalesce(sum(p.amount_rub),0)::numeric as amount_rub,
+      s.until as sub_until
+    from referrals r
+    join users u on u.id = r.child_id
+    left join payments p on p.user_id = r.child_id
+    left join subscriptions s on s.user_id = r.child_id
+    where r.ref_id = $1
+    group by u.id, u.username, u.photo, s.until
+    order by amount_rub desc, u.id
+  `, [refId]);
+
+  const total      = totalRes.rows[0]?.total || 0;
+  const amountRub  = Number(sumRes.rows[0]?.amount_rub || 0);
+  const incomeRub  = Math.round(amountRub * 0.5); // твой доход = 50%
+
+  const items = itemsRes.rows.map(r => ({
+    id: r.id,
+    username: r.username || ('@' + r.id),
+    photo: r.photo || null,
+    amountRub: Number(r.amount_rub || 0),
+    subActive: r.sub_until ? new Date(r.sub_until) > new Date() : false,
+    subUntil:  r.sub_until || null
+  }));
+
+  return { total, amountRub, incomeRub, items };
+}
+
+
 
 // ===== CORS (для отладки — пускаем всех; позже сузишь до домена фронта)
 app.use(cors({ origin: true, credentials: false }));
@@ -263,41 +383,42 @@ function linkReferral(childId, refId){
 const getReferrer = (childId)=> referrals.get(childId) || null;
 
 // --- поймать стартовый параметр и привязать реферала
-app.get('/api/ref/track', (req, res) => {
+app.get('/api/ref/track', async (req, res) => {
   try {
     const user = getUserFromInitData(req.query.initData || '');
-    const uname = user.username ? '@' + user.username : (user.first_name || 'Пользователь');
-profiles.set(user.id, { username: uname, photo: user.photo_url || null });
+    await dbUpsertUser(user);
+
     const params = new URLSearchParams(req.query.initData || '');
     const sp = params.get('start_param') || '';
-    const m = /^ref_(\d+)$/.exec(sp);
-    if (m) linkReferral(user.id, Number(m[1]));
-    res.json({ ok: true, referrer: getReferrer(user.id) });
+    const m  = /^ref_(\d+)$/.exec(sp);
+    if (m) { await dbLinkReferral(user.id, Number(m[1])); }
+
+    res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    console.error('[ref/track]', e);
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
 
-app.post('/api/ref/stats', (req, res) => {
+
+app.post('/api/ref/stats', async (req, res) => {
   try {
     const user = getUserFromInitData(req.body?.initData || '');
-    const agg  = refAgg.get(user.id) || { invites:new Set(), amountStars:0 };
+    const stats = await dbGetRefStats(user.id);
 
-    const invitedIds = Array.from(agg.invites || []);
-    const items = invitedIds.map(id => {
-      const p   = profiles.get(id) || {};
-      const sub = subs.get(id);
-      const active = !!(sub && sub.until && new Date(sub.until) > new Date());
-      return {
-        id,
-        username: p.username || ('@' + id),
-        photo: p.photo || null,
-        amount: refSpendByChild.get(id) || 0,  // СКОЛЬКО звёзд внёс именно этот приглашённый
-        subActive: active,
-        subUntil: active ? sub.until : null
-      };
+    res.json({
+      total: stats.total,
+      amountRub: stats.amountRub,
+      incomeRub: stats.incomeRub,
+      items: stats.items,
+      link: `https://t.me/${process.env.BOT_USERNAME || 'tothemoonvpnbot'}?startapp=ref_${user.id}`
     });
+  } catch (e) {
+    console.error('[ref/stats]', e);
+    res.status(401).json({ ok:false, error:'initData verification failed' });
+  }
+});
+
 
     res.json({
       total: invitedIds.length,
@@ -345,35 +466,32 @@ app.post('/api/pay/invoice', async (req, res) => {
 });
 
 // --- учёт платежа (после успешного "paid" в мини-аппе)
-app.post('/api/pay/record', (req, res) => {
+app.post('/api/pay/record', async (req, res) => {
   try {
     const { initData } = req.query;
-    const { plan, amountStars } = req.body || {};
+    const { plan, amountStars, amountRub } = req.body || {};
 
-    const amount = Number(amountStars);
-    if (!plan || !Number.isFinite(amount) || amount <= 0) {
+    // переводим в рубли, если не прислали: Stars * курс
+    const stars = Number(amountStars || 0);
+    const rub   = amountRub != null
+      ? Number(amountRub)
+      : Math.round(stars * Number(process.env.STARS_TO_RUB || 2.0));
+
+    if (!plan || (!Number.isFinite(rub) || rub <= 0)) {
       return res.status(400).json({ error: 'bad_args' });
     }
 
     const user = getUserFromInitData(initData || '');
-    const ref  = getReferrer(user.id);
-
-    if (ref) {
-      const agg = refAgg.get(ref) || { invites: new Set(), amountStars: 0 };
-      agg.invites.add(user.id);
-      agg.amountStars += amount;
-      refAgg.set(ref, agg);
-
-      // сумма пополнений конкретного приглашённого
-      refSpendByChild.set(user.id, (refSpendByChild.get(user.id) || 0) + amount);
-    }
+    await dbUpsertUser(user);
+    await dbRecordPayment(user.id, plan, stars, rub);
 
     return res.json({ ok: true });
   } catch (e) {
     console.error('[pay/record]', e);
-    return res.status(401).json({ ok: false, error: 'initData verification failed' });
+    return res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
+
 
 
 
