@@ -184,12 +184,6 @@ async function dbGetRefStats(refId) {
 // ===== CORS (для отладки — пускаем всех; позже сузишь до домена фронта)
 app.use(cors({ origin: true, credentials: false }));
 
-// ===== Конфиг Shadowsocks из ENV
-const SERVER_HOST    = process.env.SERVER_HOST || '195.133.40.43';
-const SERVER_PORT    = Number(process.env.SERVER_PORT || '8388');
-const SS_METHOD      = process.env.SS_METHOD || 'aes-256-gcm';
-const SS_PASS        = process.env.SS_PASSWORD_GLOBAL || 'changeme';
-const SUBSCRIBE_BASE = process.env.SUBSCRIBE_BASE || `https://vpn-1x0l.onrender.com/subscribe`;
 // ===== Конфиг VLESS REALITY из ENV
 const REALITY_SNI = process.env.REALITY_SNI;   // напр. 'www.cloudflare.com'
 const REALITY_PBK = process.env.REALITY_PBK;   // public key (pbk) из VPS
@@ -268,34 +262,51 @@ async function requireNotBlocked(req, res, next) {
 
 
 
-// ===== Утилиты Shadowsocks
-function buildSsUri(host, port, method, password, label = 'Shadowsocks') {
-  const userinfo = `${method}:${password}@${host}:${port}`;
-  const b64 = Buffer.from(userinfo, 'utf8').toString('base64');
-  return `ss://${b64}#${encodeURIComponent(label)}`;
-}
+
 
 // ===== Health
 app.get('/api/healthz', (req, res) => res.json({ ok: true }));
 
 // ===== Данные для мини-аппа
-app.get('/api/me', requireNotBlocked, (req, res) => {
+// БЫЛО: /api/me отдавал SS (ssUri, password, server...)
+// СТАЛО: /api/me отдаёт VLESS-ссылку и срок подписки
+app.get('/api/me', requireNotBlocked, async (req, res) => {
   try {
     const { initData } = req.query;
-    const user = getUserFromInitData(initData);
+    const user = getUserFromInitData(initData || '');
 
-    const ssUri = buildSsUri(SERVER_HOST, SERVER_PORT, SS_METHOD, SS_PASS, 'VPN');
-    res.json({
-      user:   { id: user.id, username: user.username || null },
-      server: { host: SERVER_HOST, port: SERVER_PORT, method: SS_METHOD },
-      password: SS_PASS,
-      ssUri,
-      subscribeUrl: SUBSCRIBE_BASE,
-    });
+    // достаём персональный UUID и срок
+    const q = await pool.query(
+      'select uuid, expires_at from vless_clients where user_id = $1',
+      [user.id]
+    );
+
+    const payload = {
+      user: { id: user.id, username: user.username || null },
+      // если у тебя есть ссылка/роут на оплату — оставь subscribeUrl; иначе можно убрать
+      subscribeUrl: SUBSCRIBE_BASE, 
+    };
+
+    if (q.rowCount && new Date(q.rows[0].expires_at) > new Date()) {
+      // активная подписка → строим VLESS-ссылку
+      const link = buildVlessUri(q.rows[0].uuid, `tg_${user.id}`);
+      payload.active     = true;
+      payload.vlessLink  = link;
+      payload.expires_at = q.rows[0].expires_at;
+    } else {
+      // нет подписки / истекла
+      payload.active     = false;
+      payload.vlessLink  = null;
+      payload.expires_at = null;
+      payload.reason     = 'expired_or_missing';
+    }
+
+    res.json(payload);
   } catch (e) {
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
+
 function buildVlessUri(uuid, label = 'VLESS') {
   if (!SERVER_IP || !REALITY_SNI || !REALITY_PBK || !REALITY_SID) {
     throw new Error('REALITY env is not set');
@@ -316,14 +327,7 @@ function buildVlessUri(uuid, label = 'VLESS') {
 
 // ===== SIP008 подписка (JSON) — для импорта в клиенты
 // https://github.com/shadowsocks/shadowsocks-org/wiki/SIP008-Online-Configuration-Delivery
-app.get('/subscribe', (req, res) => {
-  res.json({
-    version: 1,
-    servers: [
-      { server: SERVER_HOST, server_port: SERVER_PORT, method: SS_METHOD, password: SS_PASS }
-    ],
-  });
-});
+
 
 // ===== Подписки (через БД) =====
 
@@ -377,23 +381,22 @@ app.get('/api/sub/activateMe', requireNotBlocked, async (req, res) => {
       on conflict (user_id) do update set plan = excluded.plan, until = excluded.until
     `, [user.id, p, until]);
 
+    // === VLESS: завести/продлить персональный UUID на срок подписки
+    const r = await pool.query(`select uuid from vless_clients where user_id = $1`, [user.id]);
+    const id = r.rowCount ? r.rows[0].uuid : uuidv4();
+    await pool.query(`
+      insert into vless_clients (user_id, uuid, expires_at, label)
+      values ($1,$2,$3,$4)
+      on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
+    `, [user.id, id, until, `tg_${user.id}`]);
+
     res.json({ active: true, until: until.toISOString(), plan: p });
   } catch (e) {
     console.error('[sub/activateMe]', e);
     res.status(401).json({ error: 'initData verification failed' });
   }
-  // === VLESS: завести/продлить персональный UUID на срок подписки
-{
-  const r = await pool.query(`select uuid from vless_clients where user_id = $1`, [user.id]);
-  const id = r.rowCount ? r.rows[0].uuid : uuidv4();
-  await pool.query(`
-    insert into vless_clients (user_id, uuid, expires_at, label)
-    values ($1,$2,$3,$4)
-    on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
-  `, [user.id, id, until, `tg_${user.id}`]);
-}
-
 });
+
 
 // отменить (делаем неактивной)
 app.get('/api/sub/cancelMe', requireNotBlocked, async (req, res) => {
@@ -495,6 +498,15 @@ app.post('/admin/sub/grant', requireAdmin, async (req, res) => {
     res.json({ ok:true, until });
   } catch (e) {
     console.error('[admin/sub/grant]', e);
+    // === VLESS: завести/продлить персональный UUID на срок подписки
+const r2 = await pool.query(`select uuid from vless_clients where user_id = $1`, [userId]);
+const id2 = r2.rowCount ? r2.rows[0].uuid : uuidv4();
+await pool.query(`
+  insert into vless_clients (user_id, uuid, expires_at, label)
+  values ($1,$2,$3,$4)
+  on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
+`, [userId, id2, until, `tg_${userId}`]);
+
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
