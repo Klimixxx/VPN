@@ -1,14 +1,14 @@
 {
+  "name": "vpn-miniapp-server",
+  "private": true,
+  "version": "0.0.3",
   "type": "module",
-  "main": "server/index.js",
-  "scripts": {
-    "start": "node server/index.js"
-  },
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.19.2"
-  }
-  "dependencies": {
-  "pg": "^8.11.3"
-}
+    "express": "^4.19.2",
+    "pg": "^8.11.3"
+  },
+  "engines": { "node": ">=18" }
 }
