@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Admin • VPN</title>
+  <style>
+    :root{
+      --bg:#0E1320; --text:#EAF1FF; --muted:#9FB3D9; --card:#121827;
+      --accent:#38BDF8; --accent2:#60A5FA; --ok:#22C55E; --bad:#EF4444; --warn:#F59E0B;
+      --border:rgba(255,255,255,.08);
+    }
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif}
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    h1{font-size:20px;margin:0 0 16px}
+    .tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+    .tab{padding:10px 14px;border:1px solid var(--border);border-radius:12px;background:#0c1220;cursor:pointer}
+    .tab.active{background:linear-gradient(170deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+      border-image: linear-gradient(135deg, var(--accent2), var(--accent)) 1}
+    .panes>section{display:none}
+    .panes>section.active{display:block}
+
+    .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px}
+    .card h3{margin:0 0 6px;font-size:13px;color:var(--muted)}
+    .card b{font-size:20px}
+
+    .toolbar{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}
+    input,select,button{border-radius:10px;border:1px solid var(--border);padding:8px 10px;background:#0c1220;color:var(--text)}
+    button.primary{background:linear-gradient(170deg, rgba(255,255,255,.08), rgba(255,255,255,.02)) padding-box,
+                   linear-gradient(135deg, var(--accent2), var(--accent)) border-box;
+                   background-clip:padding-box,border-box;border:1px solid var(--border)}
+    table{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+    th,td{padding:10px;border-bottom:1px solid var(--border);font-size:13px}
+    th{text-align:left;color:var(--muted);background:#0c1220}
+    tr:last-child td{border-bottom:0}
+    .good{color:var(--ok)} .bad{color:var(--bad)} .muted{color:var(--muted)}
+    .right{float:right}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Админ-панель</h1>
+  <div class="tabs">
+    <div class="tab active" data-tab="stats">Статистика</div>
+    <div class="tab" data-tab="users">Пользователи</div>
+    <div class="tab" data-tab="servers">Сервера</div>
+    <button id="btnRefresh" class="right">Обновить</button>
+  </div>
+
+  <div class="panes">
+    <!-- Статистика -->
+    <section id="pane-stats" class="active">
+      <div class="cards" id="stats-cards"></div>
+      <div style="margin-top:12px">
+        <table id="stats-subs"><thead><tr><th>План</th><th>Активных</th></tr></thead><tbody></tbody></table>
+      </div>
+    </section>
+
+    <!-- Пользователи -->
+    <section id="pane-users">
+      <div class="toolbar">
+        <input id="searchId" type="number" placeholder="ID пользователя"/>
+        <button id="btnFind">Найти</button>
+        <select id="grantPlan">
+          <option value="w">Неделя</option><option value="1m" selected>1 месяц</option>
+          <option value="3m">3 месяца</option><option value="6m">6 месяцев</option><option value="1y">Год</option>
+        </select>
+        <button id="btnGrant" class="primary">Выдать</button>
+        <button id="btnCancel">Отменить</button>
+        <button id="btnBlock">Заблокировать</button>
+        <button id="btnUnblock">Разблокировать</button>
+      </div>
+      <table id="users-table">
+        <thead>
+          <tr><th>ID</th><th>Username</th><th>Подписка</th><th>До</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="toolbar">
+        <button id="prev">Назад</button>
+        <span id="page" class="muted"></span>
+        <button id="next">Вперёд</button>
+      </div>
+    </section>
+
+    <!-- Сервера -->
+    <section id="pane-servers">
+      <div class="toolbar">
+        <input id="svName" placeholder="Имя (EU-1)"/>
+        <input id="svHost" placeholder="Хост/IP"/>
+        <input id="svPort" type="number" placeholder="Порт"/>
+        <input id="svProto" placeholder="Протокол (shadowsocks)"/>
+        <input id="svCountry" placeholder="Страна (DE)"/>
+        <button id="btnAddServer" class="primary">Добавить сервер</button>
+      </div>
+      <table id="servers-table"><thead>
+        <tr><th>ID</th><th>Имя</th><th>Хост</th><th>Порт</th><th>Протокол</th><th>Страна</th><th></th></tr>
+      </thead><tbody></tbody></table>
+    </section>
+  </div>
+</div>
+
+<script>
+(function(){
+  const tg = window.Telegram && Telegram.WebApp;
+  const initData = tg?.initData || new URLSearchParams(location.search).get('initData') || '';
+  const API = location.origin;
+
+  function api(path, opts){
+    const url = API + path + (path.includes('?') ? '&' : '?') + 'initData=' + encodeURIComponent(initData);
+    return fetch(url, Object.assign({ headers:{'content-type':'application/json'} }, opts||{}));
+  }
+
+  // Tabs
+  document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panes>section').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('pane-' + t.dataset.tab).classList.add('active');
+  });
+  document.getElementById('btnRefresh').onclick = () => { loadStats(); loadUsers(); loadServers(); };
+
+  // --- Статистика
+  async function loadStats(){
+    const r = await api('/admin/metrics'); const j = await r.json();
+    if (!j.ok) return alert('Ошибка метрик');
+    const cards = [
+      { k:'Всего пользователей', v:j.usersTotal },
+      { k:'Новых за месяц', v:j.usersNewThisMonth },
+      { k:'Оплат за месяц', v:j.paymentsThisMonth.count },
+      { k:'Выручка за месяц, ₽', v: (j.paymentsThisMonth.amountRub||0).toLocaleString('ru-RU') },
+      { k:'Планов активных', v:j.subsActiveByPlan.length }
+    ];
+    const box = document.getElementById('stats-cards'); box.innerHTML='';
+    for (const c of cards){
+      const el = document.createElement('div'); el.className='card';
+      el.innerHTML = `<h3>${c.k}</h3><b>${c.v}</b>`;
+      box.appendChild(el);
+    }
+    const tb = document.querySelector('#stats-subs tbody'); tb.innerHTML='';
+    for (const r of j.subsActiveByPlan){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r.plan}</td><td>${r.n}</td>`;
+      tb.appendChild(tr);
+    }
+  }
+
+  // --- Пользователи
+  let state = { limit: 20, offset: 0, items: [] };
+  async function loadUsers(){
+    const r = await api(`/admin/users?limit=${state.limit}&offset=${state.offset}`);
+    const j = await r.json(); if (!j.ok) return alert('Ошибка users');
+    state.items = j.items;
+    document.getElementById('page').textContent = `offset ${state.offset}`;
+    const tb = document.querySelector('#users-table tbody'); tb.innerHTML='';
+    for (const u of j.items){
+      const tr = document.createElement('tr');
+      const until = u.subUntil ? new Date(u.subUntil).toLocaleString('ru-RU') : '-';
+      tr.innerHTML = `<td>${u.id}</td><td>${u.username||''}</td><td>${u.subPlan||'-'} ${u.subActive?'<span class="good">●</span>':'<span class="muted">●</span>'}</td><td>${until}</td>`;
+      tb.appendChild(tr);
+    }
+  }
+  document.getElementById('prev').onclick = ()=>{ state.offset = Math.max(0, state.offset - state.limit); loadUsers(); };
+  document.getElementById('next').onclick = ()=>{ state.offset += state.limit; loadUsers(); };
+
+  // Быстрые действия по ID из поля
+  document.getElementById('btnFind').onclick = async ()=>{
+    const id = Number(document.getElementById('searchId').value);
+    if (!id) return alert('Введи ID');
+    // просто подсветить в таблице (если на текущей странице)
+    [...document.querySelectorAll('#users-table tbody tr')].forEach(tr=>{
+      tr.style.outline=''; if (tr.firstChild && Number(tr.firstChild.textContent)===id){ tr.style.outline='2px solid var(--accent)'; tr.scrollIntoView({block:'center'}); }
+    });
+  };
+  document.getElementById('btnGrant').onclick = async ()=>{
+    const id = Number(document.getElementById('searchId').value);
+    const plan = document.getElementById('grantPlan').value;
+    if (!id) return alert('ID?');
+    const r = await api('/admin/sub/grant', { method:'POST', body: JSON.stringify({ userId:id, plan }) }); const j = await r.json();
+    if (!j.ok) return alert('Ошибка grant'); loadUsers(); loadStats();
+  };
+  document.getElementById('btnCancel').onclick = async ()=>{
+    const id = Number(document.getElementById('searchId').value); if (!id) return alert('ID?');
+    const r = await api('/admin/sub/cancel', { method:'POST', body: JSON.stringify({ userId:id }) }); const j = await r.json();
+    if (!j.ok) return alert('Ошибка cancel'); loadUsers(); loadStats();
+  };
+  document.getElementById('btnBlock').onclick = async ()=>{
+    const id = Number(document.getElementById('searchId').value); if (!id) return alert('ID?');
+    const r = await api('/admin/block', { method:'POST', body: JSON.stringify({ userId:id, reason:'manual' }) }); const j = await r.json();
+    if (!j.ok) return alert('Ошибка block'); alert('Пользователь заблокирован'); 
+  };
+  document.getElementById('btnUnblock').onclick = async ()=>{
+    const id = Number(document.getElementById('searchId').value); if (!id) return alert('ID?');
+    const r = await api('/admin/unblock', { method:'POST', body: JSON.stringify({ userId:id }) }); const j = await r.json();
+    if (!j.ok) return alert('Ошибка unblock'); alert('Пользователь разблокирован'); 
+  };
+
+  // --- Сервера
+  async function loadServers(){
+    const r = await api('/admin/servers'); const j = await r.json(); if (!j.ok) return alert('Ошибка servers');
+    const tb = document.querySelector('#servers-table tbody'); tb.innerHTML='';
+    for (const s of j.items){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${s.id}</td><td>${s.name||''}</td><td>${s.host||''}</td><td>${s.port||''}</td><td>${s.proto||''}</td><td>${s.country||''}</td>
+        <td><button data-del="${s.id}">Удалить</button></td>`;
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('button[data-del]').forEach(b => b.onclick = async ()=>{
+      const id = Number(b.getAttribute('data-del'));
+      if (!confirm('Удалить сервер #' + id + '?')) return;
+      const r = await api('/admin/servers/' + id, { method:'DELETE' }); const j = await r.json();
+      if (!j.ok) return alert('Ошибка delete'); loadServers();
+    });
+  }
+  document.getElementById('btnAddServer').onclick = async ()=>{
+    const name = document.getElementById('svName').value.trim();
+    const host = document.getElementById('svHost').value.trim();
+    const port = Number(document.getElementById('svPort').value) || null;
+    const proto = document.getElementById('svProto').value.trim() || null;
+    const country = document.getElementById('svCountry').value.trim() || null;
+    if (!name || !host) return alert('Имя и хост обязательны');
+    const r = await api('/admin/servers', { method:'POST', body: JSON.stringify({ name, host, port, proto, country }) });
+    const j = await r.json(); if (!j.ok) return alert('Ошибка add'); 
+    document.getElementById('svName').value=''; document.getElementById('svHost').value=''; document.getElementById('svPort').value='';
+    document.getElementById('svProto').value=''; document.getElementById('svCountry').value='';
+    loadServers();
+  };
+
+  // init
+  if (!initData){ alert('Открой эту страницу из Telegram Mini App (нужен initData).'); }
+  loadStats(); loadUsers(); loadServers();
+})();
+</script>
+</body>
+</html>
