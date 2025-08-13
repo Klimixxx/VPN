@@ -283,7 +283,7 @@ app.post('/api/ref/stats', (req, res) => {
       amountStars: agg.amountStars || 0,
       incomeStars: Math.round((agg.amountStars || 0) * 0.5),
       invitedIds: Array.from(agg.invites || []),
-      link: `https://t.me/${process.env.BOT_USERNAME || 'tothemoonvpnbot'}?start=ref_${user.id}`
+      link: `https://t.me/${process.env.BOT_USERNAME || 'tothemoonvpnbot'}?startapp=ref_${user.id}`
     });
   } catch (e) {
     console.error('[ref/stats]', e?.message || e);
