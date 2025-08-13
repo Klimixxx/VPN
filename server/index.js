@@ -356,18 +356,80 @@ app.get('/api/sub/cancelMe', (req, res) => {
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
+// === ADMIN API ===
+
 // --- /admin/metrics — общая сводка
 app.get('/admin/metrics', requireAdmin, async (req, res) => {
-  // --- /admin/users — список всех пользователей (с пагинацией)
+  try {
+    const usersTotal = await pool.query(`select count(*)::int n from users`);
+    const usersNew   = await pool.query(`select count(*)::int n from users where created_at >= date_trunc('month', now())`);
+
+    const activeSubs = await pool.query(`
+      select coalesce(plan,'unknown') as plan, count(*)::int as n
+      from subscriptions
+      where until > now()
+      group by plan
+      order by plan
+    `);
+
+    const paysMonth  = await pool.query(`
+      select count(*)::int as cnt, coalesce(sum(amount_rub),0)::numeric as sum
+      from payments
+      where created_at >= date_trunc('month', now())
+    `);
+
+    res.json({
+      ok: true,
+      usersTotal: usersTotal.rows[0].n,
+      usersNewThisMonth: usersNew.rows[0].n,
+      subsActiveByPlan: activeSubs.rows,     // [{plan:'1m', n:12}, ...]
+      paymentsThisMonth: {
+        count: paysMonth.rows[0].cnt,
+        amountRub: Number(paysMonth.rows[0].sum || 0)
+      }
+    });
+  } catch (e) {
+    console.error('[admin/metrics]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// --- /admin/users — список всех пользователей (с пагинацией)
 app.get('/admin/users', requireAdmin, async (req, res) => {
-  // --- ВЫДАТЬ ПОДПИСКУ ПО ПЛАНУ
+  try {
+    const limit  = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const q = `
+      select u.id, u.username, u.photo, u.created_at,
+             s.plan as sub_plan, s.until as sub_until
+      from users u
+      left join subscriptions s on s.user_id = u.id
+      order by u.created_at desc
+      limit $1 offset $2
+    `;
+    const rows = (await pool.query(q, [limit, offset])).rows.map(r => ({
+      id: r.id,
+      username: r.username || ('@' + r.id),
+      photo: r.photo,
+      created_at: r.created_at,
+      subActive: r.sub_until ? new Date(r.sub_until) > new Date() : false,
+      subPlan: r.sub_plan || null,
+      subUntil: r.sub_until || null
+    }));
+    res.json({ ok: true, items: rows });
+  } catch (e) {
+    console.error('[admin/users]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// --- ВЫДАТЬ ПОДПИСКУ ПО ПЛАНУ
 // POST /admin/sub/grant  { userId, plan }  план: 'w'|'1m'|'3m'|'6m'|'1y'
 app.post('/admin/sub/grant', requireAdmin, async (req, res) => {
   try {
     const { userId, plan } = req.body || {};
     if (!userId || !plan) return res.status(400).json({ ok:false, error:'bad_args' });
 
-    // если есть активная — продлеваем от её конца; иначе от текущего момента
     const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [userId]);
     const base = (cur.rowCount && cur.rows[0].until && new Date(cur.rows[0].until) > new Date())
       ? new Date(cur.rows[0].until) : new Date();
@@ -451,9 +513,7 @@ app.post('/admin/broadcast', requireAdmin, async (req, res) => {
         });
         if (r.ok) ok++; else fail++;
       } catch { fail++; }
-
-      // не спамим API — ~20 сообщений/секунду
-      if (i % 20 === 19) await new Promise(r => setTimeout(r, 1000));
+      if (i % 20 === 19) await new Promise(r => setTimeout(r, 1000)); // ~20/сек
     }
 
     res.json({ ok:true, sent: ok, failed: fail, total: users.length });
@@ -463,68 +523,6 @@ app.post('/admin/broadcast', requireAdmin, async (req, res) => {
   }
 });
 
-  try {
-    const limit  = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
-    const offset = Math.max(0, Number(req.query.offset) || 0);
-    const q = `
-      select u.id, u.username, u.photo, u.created_at,
-             s.plan as sub_plan, s.until as sub_until
-      from users u
-      left join subscriptions s on s.user_id = u.id
-      order by u.created_at desc
-      limit $1 offset $2
-    `;
-    const rows = (await pool.query(q, [limit, offset])).rows.map(r => ({
-      id: r.id,
-      username: r.username || ('@' + r.id),
-      photo: r.photo,
-      created_at: r.created_at,
-      subActive: r.sub_until ? new Date(r.sub_until) > new Date() : false,
-      subPlan: r.sub_plan || null,
-      subUntil: r.sub_until || null
-    }));
-    res.json({ ok: true, items: rows });
-  } catch (e) {
-    console.error('[admin/users]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
-
-  try {
-    const monthStart = `date_trunc('month', now())`;
-
-    const usersTotal   = await pool.query(`select count(*)::int n from users`);
-    const usersNew     = await pool.query(`select count(*)::int n from users where created_at >= ${monthStart}`);
-
-    const activeSubs   = await pool.query(`
-      select coalesce(plan,'unknown') as plan, count(*)::int as n
-      from subscriptions
-      where until > now()
-      group by plan
-      order by plan
-    `);
-
-    const paysMonth    = await pool.query(`
-      select count(*)::int as cnt, coalesce(sum(amount_rub),0)::numeric as sum
-      from payments
-      where created_at >= ${monthStart}
-    `);
-
-    res.json({
-      ok: true,
-      usersTotal: usersTotal.rows[0].n,
-      usersNewThisMonth: usersNew.rows[0].n,
-      subsActiveByPlan: activeSubs.rows,     // [{plan:'1m', n:12}, ...]
-      paymentsThisMonth: {
-        count: paysMonth.rows[0].cnt,
-        amountRub: Number(paysMonth.rows[0].sum || 0)
-      }
-    });
-  } catch (e) {
-    console.error('[admin/metrics]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
 // GET /admin/servers
 app.get('/admin/servers', requireAdmin, async (req, res) => {
   try {
