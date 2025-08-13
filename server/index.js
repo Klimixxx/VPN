@@ -420,22 +420,6 @@ app.post('/api/ref/stats', async (req, res) => {
 });
 
 
-    res.json({
-      total: invitedIds.length,
-      amountStars: agg.amountStars || 0,
-      incomeStars: Math.round((agg.amountStars || 0) * 0.5),
-      items,
-      // ВАЖНО: startapp, чтобы ref попал в initData
-      link: `https://t.me/${process.env.BOT_USERNAME || 'tothemoonvpnbot'}?startapp=ref_${user.id}`
-    });
-  } catch (e) {
-    console.error('[ref/stats]', e?.message || e);
-    res.status(401).json({ ok:false, error:'initData verification failed' });
-  }
-});
-
-
-
 
 // --- создать инвойс в Stars под выбранный план
 app.post('/api/pay/invoice', async (req, res) => {
