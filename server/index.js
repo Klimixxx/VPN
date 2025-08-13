@@ -17,19 +17,18 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }, // для serverless Postgres
 });
 
-// создаём таблицы, если их ещё нет
 async function ensureSchema() {
   const sql = `
   create table if not exists users (
-    id            bigint primary key,      -- Telegram user id
+    id            bigint primary key,
     username      text,
     photo         text,
     created_at    timestamptz default now()
   );
 
   create table if not exists referrals (
-    child_id      bigint primary key,      -- приглашённый
-    ref_id        bigint not null,         -- кто пригласил
+    child_id      bigint primary key,
+    ref_id        bigint not null,
     created_at    timestamptz default now()
   );
 
@@ -44,14 +43,37 @@ async function ensureSchema() {
 
   create table if not exists subscriptions (
     user_id       bigint primary key,
+    plan          text,                     -- ДОБАВЛЕНО: текущий план ('w','1m','3m','6m','1y' и т.п.)
     until         timestamptz not null
   );
 
-  create index if not exists payments_user_id_idx on payments(user_id);
-  create index if not exists referrals_ref_id_idx on referrals(ref_id);
+  create table if not exists blocks (
+    user_id       bigint primary key,       -- заблокированные пользователи
+    reason        text,
+    until         timestamptz               -- опционально, до какого времени (null = навсегда)
+  );
+
+  create table if not exists servers (
+    id            bigserial primary key,
+    name          text not null,            -- отображаемое имя
+    host          text not null,
+    port          integer,
+    proto         text,                     -- например 'v2ray','wireguard','openvpn'
+    country       text,
+    active        boolean default true,
+    notes         text,
+    config        jsonb,                    -- произвольный JSON (URI, ключи и т.п.)
+    created_at    timestamptz default now()
+  );
+
+  create index if not exists idx_subs_until on subscriptions(until);
+  create index if not exists idx_pays_created on payments(created_at);
+  create index if not exists idx_users_created on users(created_at);
+  create index if not exists idx_ref_refid   on referrals(ref_id);
   `;
   await pool.query(sql);
 }
+
 ensureSchema().catch(e => console.error('ensureSchema', e));
 
 // маленькие помощники
@@ -178,6 +200,34 @@ function getUserFromInitData(initData) {
   }
   return data.user; // { id, username, ... }
 }
+// === admin guard + helpers ===
+function requireAdmin(req, res, next) {
+  const ids = (process.env.ADMIN_IDS || '')
+    .split(',')
+    .map(x => Number(x.trim()))
+    .filter(Boolean);
+  try {
+    const initData = req.query.initData || req.body?.initData || '';
+    const me = getUserFromInitData(initData); // уже есть в файле
+    if (ids.includes(me.id)) return next();
+  } catch (e) {}
+  return res.status(403).json({ ok:false, error:'forbidden' });
+}
+
+// Продлить/назначить подписку по плану
+function addPlanToDate(plan, base = new Date()) {
+  const d = new Date(Math.max(new Date(base).getTime(), Date.now()));
+  switch (plan) {
+    case 'w':  d.setDate(d.getDate() + 7);  break;
+    case '1m': d.setMonth(d.getMonth() + 1); break;
+    case '3m': d.setMonth(d.getMonth() + 3); break;
+    case '6m': d.setMonth(d.getMonth() + 6); break;
+    case '1y': d.setFullYear(d.getFullYear() + 1); break;
+    default:   d.setMonth(d.getMonth() + 1);
+  }
+  return d;
+}
+
 
 // ===== Утилиты Shadowsocks
 function buildSsUri(host, port, method, password, label = 'Shadowsocks') {
@@ -304,6 +354,215 @@ app.get('/api/sub/cancelMe', (req, res) => {
   } catch (e) {
     console.error('cancelMe[GET] error:', e?.message || e);
     res.status(401).json({ error: 'initData verification failed' });
+  }
+});
+// --- /admin/metrics — общая сводка
+app.get('/admin/metrics', requireAdmin, async (req, res) => {
+  // --- /admin/users — список всех пользователей (с пагинацией)
+app.get('/admin/users', requireAdmin, async (req, res) => {
+  // --- ВЫДАТЬ ПОДПИСКУ ПО ПЛАНУ
+// POST /admin/sub/grant  { userId, plan }  план: 'w'|'1m'|'3m'|'6m'|'1y'
+app.post('/admin/sub/grant', requireAdmin, async (req, res) => {
+  try {
+    const { userId, plan } = req.body || {};
+    if (!userId || !plan) return res.status(400).json({ ok:false, error:'bad_args' });
+
+    // если есть активная — продлеваем от её конца; иначе от текущего момента
+    const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [userId]);
+    const base = (cur.rowCount && cur.rows[0].until && new Date(cur.rows[0].until) > new Date())
+      ? new Date(cur.rows[0].until) : new Date();
+    const until = addPlanToDate(plan, base);
+
+    await pool.query(`
+      insert into subscriptions (user_id, plan, until)
+      values ($1,$2,$3)
+      on conflict (user_id) do update set plan = excluded.plan, until = excluded.until
+    `, [userId, plan, until]);
+
+    res.json({ ok:true, until });
+  } catch (e) {
+    console.error('[admin/sub/grant]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// --- ОТМЕНИТЬ ПОДПИСКУ (делаем неактивной сейчас)
+app.post('/admin/sub/cancel', requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) return res.status(400).json({ ok:false, error:'bad_args' });
+    await pool.query(`update subscriptions set until = now() - interval '1 second' where user_id = $1`, [userId]);
+    res.json({ ok:true });
+  } catch (e) {
+    console.error('[admin/sub/cancel]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// --- ЗАБЛОКИРОВАТЬ ПОЛЬЗОВАТЕЛЯ
+// POST /admin/block  { userId, reason, until }  (until — ISO-строка или null)
+app.post('/admin/block', requireAdmin, async (req, res) => {
+  try {
+    const { userId, reason, until } = req.body || {};
+    if (!userId) return res.status(400).json({ ok:false, error:'bad_args' });
+    await pool.query(`
+      insert into blocks (user_id, reason, until)
+      values ($1,$2,$3)
+      on conflict (user_id) do update set reason = excluded.reason, until = excluded.until
+    `, [userId, reason || null, until ? new Date(until) : null]);
+    res.json({ ok:true });
+  } catch (e) {
+    console.error('[admin/block]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// --- РАЗБЛОКИРОВАТЬ ПОЛЬЗОВАТЕЛЯ
+// POST /admin/unblock  { userId }
+app.post('/admin/unblock', requireAdmin, async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) return res.status(400).json({ ok:false, error:'bad_args' });
+    await pool.query(`delete from blocks where user_id = $1`, [userId]);
+    res.json({ ok:true });
+  } catch (e) {
+    console.error('[admin/unblock]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// --- РАССЫЛКА ВСЕМ ПОЛЬЗОВАТЕЛЯМ
+// POST /admin/broadcast  { text }
+app.post('/admin/broadcast', requireAdmin, async (req, res) => {
+  try {
+    const { text } = req.body || {};
+    if (!text || !text.trim()) return res.status(400).json({ ok:false, error:'empty_text' });
+
+    const token = process.env.BOT_TOKEN;
+    const users = (await pool.query(`select id from users order by id`)).rows;
+
+    let ok = 0, fail = 0;
+    for (const [i, u] of users.entries()) {
+      try {
+        const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method:'POST',
+          headers:{ 'content-type':'application/json' },
+          body: JSON.stringify({ chat_id: u.id, text, disable_web_page_preview: true })
+        });
+        if (r.ok) ok++; else fail++;
+      } catch { fail++; }
+
+      // не спамим API — ~20 сообщений/секунду
+      if (i % 20 === 19) await new Promise(r => setTimeout(r, 1000));
+    }
+
+    res.json({ ok:true, sent: ok, failed: fail, total: users.length });
+  } catch (e) {
+    console.error('[admin/broadcast]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+  try {
+    const limit  = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const q = `
+      select u.id, u.username, u.photo, u.created_at,
+             s.plan as sub_plan, s.until as sub_until
+      from users u
+      left join subscriptions s on s.user_id = u.id
+      order by u.created_at desc
+      limit $1 offset $2
+    `;
+    const rows = (await pool.query(q, [limit, offset])).rows.map(r => ({
+      id: r.id,
+      username: r.username || ('@' + r.id),
+      photo: r.photo,
+      created_at: r.created_at,
+      subActive: r.sub_until ? new Date(r.sub_until) > new Date() : false,
+      subPlan: r.sub_plan || null,
+      subUntil: r.sub_until || null
+    }));
+    res.json({ ok: true, items: rows });
+  } catch (e) {
+    console.error('[admin/users]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+  try {
+    const monthStart = `date_trunc('month', now())`;
+
+    const usersTotal   = await pool.query(`select count(*)::int n from users`);
+    const usersNew     = await pool.query(`select count(*)::int n from users where created_at >= ${monthStart}`);
+
+    const activeSubs   = await pool.query(`
+      select coalesce(plan,'unknown') as plan, count(*)::int as n
+      from subscriptions
+      where until > now()
+      group by plan
+      order by plan
+    `);
+
+    const paysMonth    = await pool.query(`
+      select count(*)::int as cnt, coalesce(sum(amount_rub),0)::numeric as sum
+      from payments
+      where created_at >= ${monthStart}
+    `);
+
+    res.json({
+      ok: true,
+      usersTotal: usersTotal.rows[0].n,
+      usersNewThisMonth: usersNew.rows[0].n,
+      subsActiveByPlan: activeSubs.rows,     // [{plan:'1m', n:12}, ...]
+      paymentsThisMonth: {
+        count: paysMonth.rows[0].cnt,
+        amountRub: Number(paysMonth.rows[0].sum || 0)
+      }
+    });
+  } catch (e) {
+    console.error('[admin/metrics]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+// GET /admin/servers
+app.get('/admin/servers', requireAdmin, async (req, res) => {
+  try {
+    const rows = (await pool.query(`select * from servers order by created_at desc`)).rows;
+    res.json({ ok:true, items: rows });
+  } catch (e) {
+    console.error('[admin/servers][GET]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// POST /admin/servers  { name, host, port, proto, country, active, notes, config }
+app.post('/admin/servers', requireAdmin, async (req, res) => {
+  try {
+    const { name, host, port, proto, country, active, notes, config } = req.body || {};
+    if (!name || !host) return res.status(400).json({ ok:false, error:'bad_args' });
+    const q = `
+      insert into servers (name, host, port, proto, country, active, notes, config)
+      values ($1,$2,$3,$4,$5,$6,$7,$8)
+      returning *
+    `;
+    const row = (await pool.query(q, [name, host, port||null, proto||null, country||null, active!==false, notes||null, config||null])).rows[0];
+    res.json({ ok:true, item: row });
+  } catch (e) {
+    console.error('[admin/servers][POST]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// DELETE /admin/servers/:id
+app.delete('/admin/servers/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    await pool.query(`delete from servers where id = $1`, [id]);
+    res.json({ ok:true });
+  } catch (e) {
+    console.error('[admin/servers][DELETE]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
   }
 });
 
