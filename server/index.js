@@ -188,7 +188,8 @@ app.use(cors({ origin: true, credentials: false }));
 const REALITY_SNI = process.env.REALITY_SNI;   // напр. 'www.cloudflare.com'
 const REALITY_PBK = process.env.REALITY_PBK;   // public key (pbk) из VPS
 const REALITY_SID = process.env.REALITY_SID;   // shortId из VPS
-const SERVER_IP   = process.env.SERVER_IP;     // публичный IP твоего VPS
+const SERVER_IP   = process.env.SERVER_IP; 
+const SUBSCRIBE_BASE = process.env.SUBSCRIBE_BASE || null;
 
 
 // ===== Проверка Telegram initData
@@ -230,15 +231,19 @@ function getUserFromInitData(initData) {
   }
   return data.user; // { id, username, ... }
 }
+// читать initData из query, body или заголовка (надёжнее всего — из заголовка)
+function getInitDataFromReq(req) {
+  return req.query?.initData || req.body?.initData || req.get('x-init-data') || '';
+}
+
 // === admin guard + helpers ===
 function requireAdmin(req, res, next) {
   const ids = (process.env.ADMIN_IDS || '')
     .split(',')
     .map(x => Number(x.trim()))
     .filter(Boolean);
-  try {
-    const initData = req.query.initData || req.body?.initData || '';
-    const me = getUserFromInitData(initData); // уже есть в файле
+try {
+    const me = getUserFromInitData(getInitDataFromReq(req));
     if (ids.includes(me.id)) return next();
   } catch (e) {}
   return res.status(403).json({ ok:false, error:'forbidden' });
@@ -246,8 +251,7 @@ function requireAdmin(req, res, next) {
 // --- запрет для заблокированных пользователей
 async function requireNotBlocked(req, res, next) {
   try {
-    const initData = req.query.initData || req.body?.initData || '';
-    const user = getUserFromInitData(initData);
+    const user = getUserFromInitData(getInitDataFromReq(req));
     const r = await pool.query(
       `select 1 from blocks where user_id = $1 and (until is null or until > now())`,
       [user.id]
@@ -272,8 +276,7 @@ app.get('/api/healthz', (req, res) => res.json({ ok: true }));
 // СТАЛО: /api/me отдаёт VLESS-ссылку и срок подписки
 app.get('/api/me', requireNotBlocked, async (req, res) => {
   try {
-    const { initData } = req.query;
-    const user = getUserFromInitData(initData || '');
+    const user = getUserFromInitData(getInitDataFromReq(req));
 
     // достаём персональный UUID и срок
     const q = await pool.query(
@@ -353,7 +356,7 @@ function addPlanToDate(plan, base = new Date()){
 // статус подписки (читает из БД)
 app.get('/api/sub/me', requireNotBlocked, async (req, res) => {
   try {
-    const user = getUserFromInitData(req.query.initData || '');
+    const user = getUserFromInitData(getInitDataFromReq(req));
     const q = await pool.query(`select plan, until from subscriptions where user_id = $1`, [user.id]);
     const row = q.rows[0];
     const active = row?.until ? new Date(row.until) > new Date() : false;
@@ -367,8 +370,8 @@ app.get('/api/sub/me', requireNotBlocked, async (req, res) => {
 // активировать/продлить подписку (используется фронтом после оплаты)
 app.get('/api/sub/activateMe', requireNotBlocked, async (req, res) => {
   try {
-    const { initData, plan } = req.query;
-    const user = getUserFromInitData(initData || '');
+    const p = normalizePlan(String(req.query.plan || '1m'));
+const user = getUserFromInitData(getInitDataFromReq(req));
     const p = normalizePlan(String(plan || '1m'));
     const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [user.id]);
     const base = (cur.rowCount && cur.rows[0].until && new Date(cur.rows[0].until) > new Date())
@@ -401,7 +404,7 @@ app.get('/api/sub/activateMe', requireNotBlocked, async (req, res) => {
 // отменить (делаем неактивной)
 app.get('/api/sub/cancelMe', requireNotBlocked, async (req, res) => {
   try {
-    const user = getUserFromInitData(req.query.initData || '');
+   const user = getUserFromInitData(getInitDataFromReq(req));
     await pool.query(`update subscriptions set until = now() - interval '1 second' where user_id = $1`, [user.id]);
     res.json({ ok:true });
   } catch (e) {
@@ -495,21 +498,22 @@ app.post('/admin/sub/grant', requireAdmin, async (req, res) => {
       on conflict (user_id) do update set plan = excluded.plan, until = excluded.until
     `, [userId, plan, until]);
 
+    // === VLESS upsert — ДОЛЖЕН быть в try и ДО ответа
+    const r2 = await pool.query(`select uuid from vless_clients where user_id = $1`, [userId]);
+    const id2 = r2.rowCount ? r2.rows[0].uuid : uuidv4();
+    await pool.query(`
+      insert into vless_clients (user_id, uuid, expires_at, label)
+      values ($1,$2,$3,$4)
+      on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
+    `, [userId, id2, until, `tg_${userId}`]);
+
     res.json({ ok:true, until });
   } catch (e) {
     console.error('[admin/sub/grant]', e);
-    // === VLESS: завести/продлить персональный UUID на срок подписки
-const r2 = await pool.query(`select uuid from vless_clients where user_id = $1`, [userId]);
-const id2 = r2.rowCount ? r2.rows[0].uuid : uuidv4();
-await pool.query(`
-  insert into vless_clients (user_id, uuid, expires_at, label)
-  values ($1,$2,$3,$4)
-  on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
-`, [userId, id2, until, `tg_${userId}`]);
-
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 // --- ОТМЕНИТЬ ПОДПИСКУ (делаем неактивной сейчас)
 app.post('/admin/sub/cancel', requireAdmin, async (req, res) => {
@@ -711,10 +715,15 @@ const getReferrer = (childId)=> referrals.get(childId) || null;
 // --- поймать стартовый параметр и привязать реферала
 app.get('/api/ref/track', requireNotBlocked, async (req, res) => {
   try {
-    const user = getUserFromInitData(req.query.initData || '');
+    // берем initData через хелпер (query/body/заголовок x-init-data)
+    const initDataRaw = getInitDataFromReq(req);
+
+    // верифицируем подпись и получаем пользователя
+    const user = getUserFromInitData(initDataRaw);
     await dbUpsertUser(user);
 
-    const params = new URLSearchParams(req.query.initData || '');
+    // достаем start_param из ИСХОДНОЙ строки initData
+    const params = new URLSearchParams(initDataRaw);
     const sp = params.get('start_param') || '';
     const m  = /^ref_(\d+)$/.exec(sp);
     if (m) { await dbLinkReferral(user.id, Number(m[1])); }
@@ -725,6 +734,7 @@ app.get('/api/ref/track', requireNotBlocked, async (req, res) => {
     res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
+
 
 
 app.post('/api/ref/stats', requireNotBlocked, async (req, res) => {
@@ -750,8 +760,9 @@ app.post('/api/ref/stats', requireNotBlocked, async (req, res) => {
 // --- создать инвойс в Stars под выбранный план
 app.post('/api/pay/invoice', requireNotBlocked, async (req, res) => {
   try {
-    const { initData, plan } = req.body || {};
-    const user   = getUserFromInitData(initData || '');
+    const { plan } = req.body || {};
+const user = getUserFromInitData(getInitDataFromReq(req));
+
     const amount = PLAN_STARS[plan];
     if (!amount) return res.status(400).json({ error:'invalid plan' });
 
@@ -776,10 +787,10 @@ app.post('/api/pay/invoice', requireNotBlocked, async (req, res) => {
 });
 
 // --- учёт платежа (после успешного "paid" в мини-аппе)
-app.post('/api/pay/record',  requireNotBlocked, async (req, res) => {
+app.post('/api/pay/record', requireNotBlocked, async (req, res) => {
   try {
-    const { initData } = req.query;
     const { plan, amountStars, amountRub } = req.body || {};
+    const user = getUserFromInitData(getInitDataFromReq(req));
 
     // переводим в рубли, если не прислали: Stars * курс
     const stars = Number(amountStars || 0);
@@ -805,7 +816,7 @@ app.post('/api/pay/record',  requireNotBlocked, async (req, res) => {
 // ===== Пользовательская VLESS-ссылка (по initData)
 app.get('/api/vpn/link', async (req, res) => {
   try {
-    const user = getUserFromInitData(req.query.initData || '');
+    const user = getUserFromInitData(getInitDataFromReq(req));
     const q = await pool.query(
       'select uuid, expires_at from vless_clients where user_id = $1',
       [user.id]
