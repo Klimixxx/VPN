@@ -370,9 +370,9 @@ app.get('/api/sub/me', requireNotBlocked, async (req, res) => {
 // активировать/продлить подписку (используется фронтом после оплаты)
 app.get('/api/sub/activateMe', requireNotBlocked, async (req, res) => {
   try {
+    const user = getUserFromInitData(getInitDataFromReq(req));
     const p = normalizePlan(String(req.query.plan || '1m'));
-const user = getUserFromInitData(getInitDataFromReq(req));
-    const p = normalizePlan(String(plan || '1m'));
+
     const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [user.id]);
     const base = (cur.rowCount && cur.rows[0].until && new Date(cur.rows[0].until) > new Date())
       ? new Date(cur.rows[0].until) : new Date();
@@ -384,7 +384,7 @@ const user = getUserFromInitData(getInitDataFromReq(req));
       on conflict (user_id) do update set plan = excluded.plan, until = excluded.until
     `, [user.id, p, until]);
 
-    // === VLESS: завести/продлить персональный UUID на срок подписки
+    // === VLESS upsert
     const r = await pool.query(`select uuid from vless_clients where user_id = $1`, [user.id]);
     const id = r.rowCount ? r.rows[0].uuid : uuidv4();
     await pool.query(`
@@ -399,6 +399,7 @@ const user = getUserFromInitData(getInitDataFromReq(req));
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
+
 
 
 // отменить (делаем неактивной)
@@ -739,7 +740,7 @@ app.get('/api/ref/track', requireNotBlocked, async (req, res) => {
 
 app.post('/api/ref/stats', requireNotBlocked, async (req, res) => {
   try {
-    const user = getUserFromInitData(req.body?.initData || '');
+    const user = getUserFromInitData(getInitDataFromReq(req));
     const stats = await dbGetRefStats(user.id);
 
     res.json({
@@ -792,7 +793,6 @@ app.post('/api/pay/record', requireNotBlocked, async (req, res) => {
     const { plan, amountStars, amountRub } = req.body || {};
     const user = getUserFromInitData(getInitDataFromReq(req));
 
-    // переводим в рубли, если не прислали: Stars * курс
     const stars = Number(amountStars || 0);
     const rub   = amountRub != null
       ? Number(amountRub)
@@ -802,7 +802,6 @@ app.post('/api/pay/record', requireNotBlocked, async (req, res) => {
       return res.status(400).json({ error: 'bad_args' });
     }
 
-    const user = getUserFromInitData(initData || '');
     await dbUpsertUser(user);
     await dbRecordPayment(user.id, plan, stars, rub);
 
@@ -812,6 +811,7 @@ app.post('/api/pay/record', requireNotBlocked, async (req, res) => {
     return res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
+
 
 // ===== Пользовательская VLESS-ссылка (по initData)
 app.get('/api/vpn/link', async (req, res) => {
