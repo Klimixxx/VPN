@@ -230,6 +230,23 @@ function requireAdmin(req, res, next) {
   } catch (e) {}
   return res.status(403).json({ ok:false, error:'forbidden' });
 }
+// --- запрет для заблокированных пользователей
+async function requireNotBlocked(req, res, next) {
+  try {
+    const initData = req.query.initData || req.body?.initData || '';
+    const user = getUserFromInitData(initData);
+    const r = await pool.query(
+      `select 1 from blocks where user_id = $1 and (until is null or until > now())`,
+      [user.id]
+    );
+    if (r.rowCount) return res.status(403).json({ ok:false, error:'blocked' });
+    req.user = user; // прокинем дальше, если нужно
+    next();
+  } catch (e) {
+    return res.status(401).json({ ok:false, error:'initData verification failed' });
+  }
+}
+
 
 // Продлить/назначить подписку по плану
 function addPlanToDate(plan, base = new Date()) {
@@ -257,7 +274,7 @@ function buildSsUri(host, port, method, password, label = 'Shadowsocks') {
 app.get('/api/healthz', (req, res) => res.json({ ok: true }));
 
 // ===== Данные для мини-аппа
-app.get('/api/me', (req, res) => {
+app.get('/api/me', requireNotBlocked, (req, res) => {
   try {
     const { initData } = req.query;
     const user = getUserFromInitData(initData);
@@ -286,93 +303,77 @@ app.get('/subscribe', (req, res) => {
   });
 });
 
-// ===== Подписки (демо-хранилище в памяти процесса)
-// На проде заменить на БД
-const subs = new Map(); // key: telegram user id -> { active, until: ISOString }
+// ===== Подписки (через БД) =====
 
-const addDays   = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-const addMonths = (d, n) => { const x = new Date(d); x.setMonth(x.getMonth() + n); return x; };
-function planToUntil(plan) {
-  const now = new Date();
-  if (plan === '7d')  return addDays(now, 7);
-  if (plan === '1m')  return addMonths(now, 1);
-  if (plan === '3m')  return addMonths(now, 3);
-  if (plan === '6m')  return addMonths(now, 6);
-  if (plan === '12m') return addMonths(now, 12);
-  return null;
+// нормализатор планов: фронт шлёт '7d'|'1m'|'3m'|'6m'|'12m', админка — 'w'|'1m'|'3m'|'6m'|'1y'
+function normalizePlan(p){
+  if (p === '7d') return 'w';
+  if (p === '12m') return '1y';
+  return p;
+}
+function addPlanToDate(plan, base = new Date()){
+  const d = new Date(Math.max(new Date(base).getTime(), Date.now()));
+  switch (plan) {
+    case 'w':  d.setDate(d.getDate() + 7);  break;
+    case '1m': d.setMonth(d.getMonth() + 1); break;
+    case '3m': d.setMonth(d.getMonth() + 3); break;
+    case '6m': d.setMonth(d.getMonth() + 6); break;
+    case '1y': d.setFullYear(d.getFullYear() + 1); break;
+    default:   d.setMonth(d.getMonth() + 1);
+  }
+  return d;
 }
 
-// ---- статус подписки
-app.get('/api/sub/me', (req, res) => {
+// статус подписки (читает из БД)
+app.get('/api/sub/me', requireNotBlocked, async (req, res) => {
   try {
-    const { initData } = req.query;
-    const user = getUserFromInitData(initData || '');
-    const cur = subs.get(user.id);
-    const active = !!(cur && cur.until && new Date(cur.until) > new Date());
-    res.json({ active, until: active ? cur.until : null });
+    const user = getUserFromInitData(req.query.initData || '');
+    const q = await pool.query(`select plan, until from subscriptions where user_id = $1`, [user.id]);
+    const row = q.rows[0];
+    const active = row?.until ? new Date(row.until) > new Date() : false;
+    res.json({ active, until: active ? row.until : null, plan: row?.plan || null });
   } catch (e) {
-    console.error('sub/me error:', e?.message || e);
+    console.error('[sub/me]', e);
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
 
-// ---- активировать подписку (POST)
-app.post('/api/sub/activateMe', (req, res) => {
-  try {
-    const { initData, plan } = req.query; // фронт шлёт через query
-    const user  = getUserFromInitData(initData || '');
-    const until = planToUntil(plan);
-    if (!until) return res.status(400).json({ error: 'invalid plan' });
-    const payload = { active: true, until: until.toISOString() };
-    subs.set(user.id, payload);
-    res.json(payload);
-  } catch (e) {
-    console.error('activateMe error:', e?.message || e);
-    res.status(401).json({ error: 'initData verification failed' });
-  }
-});
-
-// ---- (удобно для проверки из браузера) зеркала через GET
-app.get('/api/sub/activateMe', (req, res) => {
+// активировать/продлить подписку (используется фронтом после оплаты)
+app.get('/api/sub/activateMe', requireNotBlocked, async (req, res) => {
   try {
     const { initData, plan } = req.query;
-    const user  = getUserFromInitData(initData || '');
-    const until = planToUntil(plan);
-    if (!until) return res.status(400).json({ error: 'invalid plan' });
-    const payload = { active: true, until: until.toISOString() };
-    subs.set(user.id, payload);
-    res.json(payload);
+    const user = getUserFromInitData(initData || '');
+    const p = normalizePlan(String(plan || '1m'));
+    const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [user.id]);
+    const base = (cur.rowCount && cur.rows[0].until && new Date(cur.rows[0].until) > new Date())
+      ? new Date(cur.rows[0].until) : new Date();
+    const until = addPlanToDate(p, base);
+
+    await pool.query(`
+      insert into subscriptions (user_id, plan, until)
+      values ($1,$2,$3)
+      on conflict (user_id) do update set plan = excluded.plan, until = excluded.until
+    `, [user.id, p, until]);
+
+    res.json({ active: true, until: until.toISOString(), plan: p });
   } catch (e) {
-    console.error('activateMe[GET] error:', e?.message || e);
+    console.error('[sub/activateMe]', e);
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
 
-// ---- отменить подписку (POST)
-app.post('/api/sub/cancelMe', (req, res) => {
+// отменить (делаем неактивной)
+app.get('/api/sub/cancelMe', requireNotBlocked, async (req, res) => {
   try {
-    const { initData } = req.query;
-    const user = getUserFromInitData(initData || '');
-    subs.delete(user.id);
-    res.json({ ok: true });
+    const user = getUserFromInitData(req.query.initData || '');
+    await pool.query(`update subscriptions set until = now() - interval '1 second' where user_id = $1`, [user.id]);
+    res.json({ ok:true });
   } catch (e) {
-    console.error('cancelMe error:', e?.message || e);
+    console.error('[sub/cancelMe]', e);
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
 
-// ---- (зеркало для браузера) GET
-app.get('/api/sub/cancelMe', (req, res) => {
-  try {
-    const { initData } = req.query;
-    const user = getUserFromInitData(initData || '');
-    subs.delete(user.id);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('cancelMe[GET] error:', e?.message || e);
-    res.status(401).json({ error: 'initData verification failed' });
-  }
-});
 // === ADMIN API ===
 
 // --- /admin/metrics — общая сводка
@@ -663,7 +664,7 @@ function linkReferral(childId, refId){
 const getReferrer = (childId)=> referrals.get(childId) || null;
 
 // --- поймать стартовый параметр и привязать реферала
-app.get('/api/ref/track', async (req, res) => {
+app.get('/api/ref/track', requireNotBlocked, async (req, res) => {
   try {
     const user = getUserFromInitData(req.query.initData || '');
     await dbUpsertUser(user);
@@ -681,7 +682,7 @@ app.get('/api/ref/track', async (req, res) => {
 });
 
 
-app.post('/api/ref/stats', async (req, res) => {
+app.post('/api/ref/stats', requireNotBlocked, async (req, res) => {
   try {
     const user = getUserFromInitData(req.body?.initData || '');
     const stats = await dbGetRefStats(user.id);
@@ -702,7 +703,7 @@ app.post('/api/ref/stats', async (req, res) => {
 
 
 // --- создать инвойс в Stars под выбранный план
-app.post('/api/pay/invoice', async (req, res) => {
+app.post('/api/pay/invoice', requireNotBlocked, async (req, res) => {
   try {
     const { initData, plan } = req.body || {};
     const user   = getUserFromInitData(initData || '');
@@ -730,7 +731,7 @@ app.post('/api/pay/invoice', async (req, res) => {
 });
 
 // --- учёт платежа (после успешного "paid" в мини-аппе)
-app.post('/api/pay/record', async (req, res) => {
+app.post('/api/pay/record',  requireNotBlocked, async (req, res) => {
   try {
     const { initData } = req.query;
     const { plan, amountStars, amountRub } = req.body || {};
