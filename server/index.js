@@ -352,6 +352,27 @@ function addPlanToDate(plan, base = new Date()){
   }
   return d;
 }
+async function grantSubscription(userId, plan) {
+  const p = normalizePlan(String(plan));
+  const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [userId]);
+  const base = (cur.rowCount && cur.rows[0].until && new Date(cur.rows[0].until) > new Date())
+    ? new Date(cur.rows[0].until) : new Date();
+  const until = addPlanToDate(p, base);
+  await pool.query(`
+    insert into subscriptions (user_id, plan, until)
+    values ($1,$2,$3)
+    on conflict (user_id) do update set plan = excluded.plan, until = excluded.until
+  `, [userId, p, until]);
+  const r = await pool.query(`select uuid from vless_clients where user_id = $1`, [userId]);
+  const id = r.rowCount ? r.rows[0].uuid : uuidv4();
+  await pool.query(`
+    insert into vless_clients (user_id, uuid, expires_at, label)
+    values ($1,$2,$3,$4)
+    on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
+  `, [userId, id, until, `tg_${userId}`]);
+  return until;
+}
+
 
 // статус подписки (читает из БД)
 app.get('/api/sub/me', requireNotBlocked, async (req, res) => {
@@ -363,39 +384,6 @@ app.get('/api/sub/me', requireNotBlocked, async (req, res) => {
     res.json({ active, until: active ? row.until : null, plan: row?.plan || null });
   } catch (e) {
     console.error('[sub/me]', e);
-    res.status(401).json({ error: 'initData verification failed' });
-  }
-});
-
-// активировать/продлить подписку (используется фронтом после оплаты)
-app.get('/api/sub/activateMe', requireNotBlocked, async (req, res) => {
-  try {
-    const user = getUserFromInitData(getInitDataFromReq(req));
-    const p = normalizePlan(String(req.query.plan || '1m'));
-
-    const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [user.id]);
-    const base = (cur.rowCount && cur.rows[0].until && new Date(cur.rows[0].until) > new Date())
-      ? new Date(cur.rows[0].until) : new Date();
-    const until = addPlanToDate(p, base);
-
-    await pool.query(`
-      insert into subscriptions (user_id, plan, until)
-      values ($1,$2,$3)
-      on conflict (user_id) do update set plan = excluded.plan, until = excluded.until
-    `, [user.id, p, until]);
-
-    // === VLESS upsert
-    const r = await pool.query(`select uuid from vless_clients where user_id = $1`, [user.id]);
-    const id = r.rowCount ? r.rows[0].uuid : uuidv4();
-    await pool.query(`
-      insert into vless_clients (user_id, uuid, expires_at, label)
-      values ($1,$2,$3,$4)
-      on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
-    `, [user.id, id, until, `tg_${user.id}`]);
-
-    res.json({ active: true, until: until.toISOString(), plan: p });
-  } catch (e) {
-    console.error('[sub/activateMe]', e);
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
@@ -811,6 +799,36 @@ app.post('/api/pay/record', requireNotBlocked, async (req, res) => {
     return res.status(401).json({ ok:false, error:'initData verification failed' });
   }
 });
+
+// Telegram webhook: activates subscription only after successful payment
+const TG_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+
+app.post('/api/tg/webhook', async (req, res) => {
+  try {
+    const hdr = req.get('x-telegram-bot-api-secret-token') || '';
+    if (TG_WEBHOOK_SECRET && hdr !== TG_WEBHOOK_SECRET) return res.sendStatus(403);
+
+    const update = req.body || {};
+    const sp = update?.message?.successful_payment;
+    if (sp && sp.invoice_payload) {
+      let payload = {};
+      try { payload = JSON.parse(sp.invoice_payload); } catch {}
+      if (payload.t === 'sub' && payload.uid && payload.plan) {
+        const userId = Number(payload.uid);
+        const plan = String(payload.plan);
+        const stars = Number(sp.total_amount || 0);
+        const rub = null;
+        try { await dbRecordPayment(userId, plan, stars, rub); } catch (e) { console.warn('record fail', e); }
+        await grantSubscription(userId, plan);
+      }
+    }
+    res.sendStatus(200);
+  } catch (e) {
+    console.error('[tg/webhook]', e);
+    res.sendStatus(200);
+  }
+});
+
 
 
 // ===== Пользовательская VLESS-ссылка (по initData)
