@@ -99,6 +99,12 @@ async function ensureSchema() {
     updated_at  timestamptz not null default now()
   );
   create index if not exists idx_vless_expires on vless_clients (expires_at);
+  -- Бесплатные пробные периоды
+create table if not exists free_trials (
+  user_id     bigint primary key,
+  claimed_at  timestamptz default now()
+);
+
 
   `);
 }
@@ -381,12 +387,35 @@ app.get('/api/sub/me', requireNotBlocked, async (req, res) => {
     const q = await pool.query(`select plan, until from subscriptions where user_id = $1`, [user.id]);
     const row = q.rows[0];
     const active = row?.until ? new Date(row.until) > new Date() : false;
-    res.json({ active, until: active ? row.until : null, plan: row?.plan || null });
+    // можно ли показать триал
+    const t = await pool.query(`select 1 from free_trials where user_id = $1`, [user.id]);
+    const trialEligible = !t.rowCount;
+    res.json({ active, until: active ? row.until : null, plan: row?.plan || null, trialEligible });
   } catch (e) {
     console.error('[sub/me]', e);
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
+// Claim 7-day free trial (once per user)
+app.post('/api/sub/claimTrial', requireNotBlocked, async (req, res) => {
+  try {
+    const user = getUserFromInitData(getInitDataFromReq(req));
+    const t = await pool.query(`select 1 from free_trials where user_id = $1`, [user.id]);
+    if (t.rowCount) return res.status(400).json({ ok:false, error:'already_claimed' });
+
+    const q = await pool.query(`select until from subscriptions where user_id = $1`, [user.id]);
+    const active = q.rowCount && q.rows[0].until && new Date(q.rows[0].until) > new Date();
+    if (active) return res.status(400).json({ ok:false, error:'already_active' });
+
+    await pool.query(`insert into free_trials (user_id) values ($1) on conflict do nothing`, [user.id]);
+    await grantSubscription(user.id, 'w'); // 7 дней
+    res.json({ ok:true });
+  } catch (e) {
+    console.error('[claimTrial]', e);
+    res.status(401).json({ ok:false, error: 'initData verification failed' });
+  }
+});
+
 
 
 
