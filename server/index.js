@@ -803,6 +803,74 @@ const user = getUserFromInitData(getInitDataFromReq(req));
     res.status(500).json({ error:'server_error', message: e?.message || String(e) });
   }
 });
+// === CRYPTO (NOWPayments) =============================
+const PLAN_RUB = { '7d':199, '1m':499, '3m':1290, '6m':2290, '12m':3990 };
+const FX_RUB_USD = Number(process.env.FX_RUB_USD || '0.011'); // 1₽ ≈ 0.011$
+const NOWPAY_API = 'https://api.nowpayments.io/v1';
+const NOWPAY_KEY = process.env.NOWPAY_API_KEY || '';
+const SITE_URL   = process.env.SITE_URL || 'https://your-domain.example';
+
+app.post('/api/pay/crypto/invoice', requireNotBlocked, async (req, res) => {
+  try {
+    const { plan } = req.body || {};
+    const user = getUserFromInitData(getInitDataFromReq(req));
+    const priceRub = PLAN_RUB[plan];
+    if (!priceRub) return res.status(400).json({ error:'invalid_plan' });
+
+    const priceUsd = Math.max(0.5, Number((priceRub * FX_RUB_USD).toFixed(2)));
+    const body = {
+      price_amount: priceUsd,
+      price_currency: 'usd',
+      order_id: `sub|${plan}|${user.id}|${Date.now()}`,
+      order_description: `VPN ${humanPlan(plan)} (tg ${user.id})`,
+      success_url: `${SITE_URL}/?paid=1`,
+      cancel_url: `${SITE_URL}/?canceled=1`,
+    };
+
+    const r = await fetch(`${NOWPAY_API}/invoice`, {
+      method:'POST',
+      headers:{ 'content-type':'application/json', 'x-api-key': NOWPAY_KEY },
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    if (!r.ok || !j?.invoice_url) return res.status(500).json({ error:'nowpay_error', details:j });
+
+    res.json({ url: j.invoice_url, id: j.id || j.invoice_id || null });
+  } catch (e) {
+    console.error('[crypto/invoice]', e);
+    res.status(500).json({ error:'server_error', message: e?.message || String(e) });
+  }
+});
+
+app.get('/api/pay/crypto/status', requireNotBlocked, async (req, res) => {
+  try {
+    const invoiceId = req.query.id;
+    if (!invoiceId) return res.status(400).json({ error: 'no_invoice' });
+
+    const me = getUserFromInitData(getInitDataFromReq(req));
+    const r = await fetch(`${NOWPAY_API}/invoice/${invoiceId}`, {
+      headers: { 'x-api-key': NOWPAY_KEY }
+    });
+    const j = await r.json();
+    if (!r.ok) return res.status(500).json({ error:'nowpay_error', details:j });
+
+    const st = String(j.status || '').toLowerCase();
+    if (st === 'finished' || st === 'confirmed' || st === 'paid') {
+      const [t, plan, uid] = String(j.order_id || '').split('|');
+      const uidNum = Number(uid);
+      if (t === 'sub' && plan && uidNum && uidNum === me.id) {
+        await dbRecordPayment(me.id, plan, 0, PLAN_RUB[plan] || 0);
+        await grantSubscription(me.id, plan);
+        return res.json({ ok:true, activated:true });
+      }
+    }
+    res.json({ ok:true, activated:false, status: j.status });
+  } catch (e) {
+    console.error('[crypto/status]', e);
+    res.status(500).json({ error:'server_error', message: e?.message || String(e) });
+  }
+});
+
 
 // --- учёт платежа (после успешного "paid" в мини-аппе)
 app.post('/api/pay/record', requireNotBlocked, async (req, res) => {
