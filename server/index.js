@@ -104,11 +104,7 @@ create table if not exists free_trials (
   user_id     bigint primary key,
   claimed_at  timestamptz default now()
 );
--- Бесплатные пробные периоды
-create table if not exists free_trials (
-  user_id     bigint primary key,
-  claimed_at  timestamptz default now()
-);
+
 -- Аркада: лучшие результаты
 create table if not exists arcade_scores (
   user_id     bigint primary key,
@@ -124,7 +120,7 @@ create index if not exists idx_arcade_score on arcade_scores (score desc);
 }
 
 
-.catch(e => console.error('ensureSchema', e));
+ensureSchema().catch(e => console.error('ensureSchema', e));
 
 // маленькие помощники
 async function dbUpsertUser(u) {
