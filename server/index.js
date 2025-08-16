@@ -104,6 +104,8 @@ create table if not exists free_trials (
   user_id     bigint primary key,
   claimed_at  timestamptz default now()
 );
+
+  `);
 }
 
 
