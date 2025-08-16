@@ -104,19 +104,6 @@ create table if not exists free_trials (
   user_id     bigint primary key,
   claimed_at  timestamptz default now()
 );
-
--- Аркада: лучшие результаты
-create table if not exists arcade_scores (
-  user_id     bigint primary key,
-  score       int not null,
-  distance    int not null default 0,
-  played_at   timestamptz not null default now()
-);
-create index if not exists idx_arcade_score on arcade_scores (score desc);
-
-
-
-  `);
 }
 
 
@@ -440,67 +427,7 @@ app.get('/api/sub/cancelMe', requireNotBlocked, async (req, res) => {
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
-// POST /api/arcade/score  { score, distance }
-app.post('/api/arcade/score', requireNotBlocked, async (req, res) => {
-  try {
-    const user = getUserFromInitData(getInitDataFromReq(req));
-    const { score, distance } = req.body || {};
-    const s = Math.max(0, Number(score||0)|0);
-    const d = Math.max(0, Number(distance||0)|0);
 
-    await pool.query(`
-      insert into arcade_scores (user_id, score, distance, played_at)
-      values ($1,$2,$3, now())
-      on conflict (user_id) do update
-        set score = greatest(arcade_scores.score, excluded.score),
-            distance = case when excluded.score > arcade_scores.score
-                            then excluded.distance else arcade_scores.distance end,
-            played_at = case when excluded.score > arcade_scores.score
-                             then now() else arcade_scores.played_at end
-    `, [user.id, s, d]);
-
-    res.json({ ok:true });
-  } catch (e) {
-    console.error('[arcade/score]', e);
-    res.status(401).json({ ok:false, error:'initData verification failed' });
-  }
-});
-// GET /api/arcade/top?limit=10
-app.get('/api/arcade/top', requireNotBlocked, async (req, res) => {
-  try {
-    const me = getUserFromInitData(getInitDataFromReq(req));
-    const limit = Math.min(50, Math.max(1, Number(req.query.limit)||10));
-
-    const top = await pool.query(`
-      select u.id, u.username, s.score, s.distance
-      from arcade_scores s
-      join users u on u.id = s.user_id
-      order by s.score desc, s.distance desc
-      limit $1
-    `, [limit]);
-
-    const rankRes = await pool.query(`
-      with ranked as (
-        select user_id, score, distance,
-               row_number() over (order by score desc, distance desc) as r
-        from arcade_scores
-      )
-      select r from ranked where user_id = $1
-    `, [me.id]);
-
-    res.json({
-      ok:true,
-      top: top.rows.map(r => ({
-        id: r.id, username: r.username || ('@'+r.id),
-        score: r.score, distance: r.distance
-      })),
-      meRank: rankRes.rows[0]?.r || null
-    });
-  } catch (e) {
-    console.error('[arcade/top]', e);
-    res.status(401).json({ ok:false, error:'initData verification failed' });
-  }
-});
 
 
 // === ADMIN API ===
