@@ -112,19 +112,25 @@
     </section>
 
     <!-- Сервера -->
-    <section id="pane-servers">
-      <div class="toolbar">
-        <input id="svName" placeholder="Имя (EU-1)"/>
-        <input id="svHost" placeholder="Хост/IP"/>
-        <input id="svPort" type="number" placeholder="Порт"/>
-        <input id="svProto" placeholder="Протокол (shadowsocks)"/>
-        <input id="svCountry" placeholder="Страна (DE)"/>
-        <button id="btnAddServer" class="primary">Добавить сервер</button>
-      </div>
-      <table id="servers-table"><thead>
-        <tr><th>ID</th><th>Имя</th><th>Хост</th><th>Порт</th><th>Протокол</th><th>Страна</th><th></th></tr>
-      </thead><tbody></tbody></table>
-    </section>
+   <div class="toolbar">
+  <input id="svName" placeholder="Имя (EU-1)"/>
+  <input id="svHost" placeholder="Хост/IP"/>
+  <input id="svPort" type="number" placeholder="Порт (443)"/>
+  <input id="svBw" type="number" placeholder="Скорость, Мбит/с (200 или 1000)"/>
+  <input id="svCountry" placeholder="Страна (DE)"/>
+  <button id="btnAddServer" class="primary">Добавить сервер</button>
+</div>
+
+<table id="servers-table">
+  <thead>
+    <tr>
+      <th>ID</th><th>Имя</th><th>Хост</th><th>Порт</th><th>Протокол</th><th>Страна</th>
+      <th>Выдано / Лимит</th><th>Лимит пер-юзер</th><th>IP сейчас</th><th></th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
   </div>
 </div>
 
@@ -227,12 +233,23 @@
   async function loadServers(){
     const r = await api('/admin/servers'); const j = await r.json(); if (!j.ok) return alert('Ошибка servers');
     const tb = document.querySelector('#servers-table tbody'); tb.innerHTML='';
-    for (const s of j.items){
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${s.id}</td><td>${s.name||''}</td><td>${s.host||''}</td><td>${s.port||''}</td><td>${s.proto||''}</td><td>${s.country||''}</td>
-        <td><button data-del="${s.id}">Удалить</button></td>`;
-      tb.appendChild(tr);
-    }
+   for (const s of j.items){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>${s.id}</td>
+    <td>${s.name||''}</td>
+    <td>${s.host||''}</td>
+    <td>${s.port||''}</td>
+    <td>vless</td>
+    <td>${s.country||''}</td>
+    <td>${(s.assigned_count||0)} / ${(s.slot_limit||'—')}</td>
+    <td>${(s.per_user_cap_mbps||'—')} / ${(s.per_user_ceil_mbps||'—')} Мбит/с</td>
+    <td>${(s.live_ips||[]).length}</td>
+    <td><button data-del="${s.id}">Удалить</button></td>
+  `;
+  tb.appendChild(tr);
+}
+
     tb.querySelectorAll('button[data-del]').forEach(b => b.onclick = async ()=>{
       const id = Number(b.getAttribute('data-del'));
       if (!confirm('Удалить сервер #' + id + '?')) return;
@@ -240,19 +257,29 @@
       if (!j.ok) return alert('Ошибка delete'); loadServers();
     });
   }
-  document.getElementById('btnAddServer').onclick = async ()=>{
-    const name = document.getElementById('svName').value.trim();
-    const host = document.getElementById('svHost').value.trim();
-    const port = Number(document.getElementById('svPort').value) || null;
-    const proto = document.getElementById('svProto').value.trim() || null;
-    const country = document.getElementById('svCountry').value.trim() || null;
-    if (!name || !host) return alert('Имя и хост обязательны');
-    const r = await api('/admin/servers', { method:'POST', body: JSON.stringify({ name, host, port, proto, country }) });
-    const j = await r.json(); if (!j.ok) return alert('Ошибка add'); 
-    document.getElementById('svName').value=''; document.getElementById('svHost').value=''; document.getElementById('svPort').value='';
-    document.getElementById('svProto').value=''; document.getElementById('svCountry').value='';
-    loadServers();
-  };
+ document.getElementById('btnAddServer').onclick = async ()=>{
+  const name = document.getElementById('svName').value.trim();
+  const host = document.getElementById('svHost').value.trim();
+  const port = Number(document.getElementById('svPort').value) || null;
+  const bw  = Number(document.getElementById('svBw').value) || 200; // 200 по умолчанию
+  const country = document.getElementById('svCountry').value.trim() || null;
+
+  if (!name || !host) return alert('Имя и хост обязательны');
+
+  const r = await api('/admin/servers', {
+    method:'POST',
+    body: JSON.stringify({ name, host, port, country, bandwidth_mbps: bw })
+  });
+  const j = await r.json(); if (!j.ok) return alert('Ошибка add');
+
+  document.getElementById('svName').value='';
+  document.getElementById('svHost').value='';
+  document.getElementById('svPort').value='';
+  document.getElementById('svBw').value='';
+  document.getElementById('svCountry').value='';
+  loadServers();
+};
+
     // --- Рассылка
   const bcText = document.getElementById('bcText');
   const bcCount = document.getElementById('bcCount');
