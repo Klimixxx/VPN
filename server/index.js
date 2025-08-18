@@ -767,16 +767,70 @@ app.post('/admin/broadcast', requireAdmin, async (req, res) => {
   }
 });
 
-// GET /admin/servers
+// GET /admin/servers — с агрегатами: выдано/лимит, пер-юзер лимиты из config, активные IP
 app.get('/admin/servers', requireAdmin, async (req, res) => {
   try {
-    const rows = (await pool.query(`select * from servers order by created_at desc`)).rows;
-    res.json({ ok:true, items: rows });
+    // 1) Берём все сервера
+    const servers = (await pool.query(
+      `select id, name, host, port, proto, country, active, config, created_at
+       from servers
+       order by created_at desc`
+    )).rows;
+
+    if (!servers.length) return res.json({ ok:true, items: [] });
+
+    const ids = servers.map(s => s.id);
+
+    // 2) Сколько пользователей назначено на каждый сервер
+    const alloc = await pool.query(
+      `select server_id, count(*)::int as assigned
+       from server_allocations
+       where server_id = any($1::bigint[])
+       group by server_id`,
+      [ids]
+    );
+    const assignedByServer = new Map(alloc.rows.map(r => [r.server_id, r.assigned]));
+
+    // 3) Активные IP за последние N минут (напр., 3 минуты)
+    const live = await pool.query(
+      `select server_id, array_agg(ip order by ip)::inet[] as ips
+       from server_connections
+       where server_id = any($1::bigint[])
+         and seen_at > now() - interval '3 minutes'
+       group by server_id`,
+      [ids]
+    );
+    const liveByServer = new Map(live.rows.map(r => [r.server_id, r.ips || []]));
+
+    // 4) Собираем ответ
+    const items = servers.map(s => {
+      const cfg = s.config || {};
+      return {
+        id: s.id,
+        name: s.name,
+        host: s.host,
+        port: s.port,
+        proto: 'vless',
+        country: s.country,
+        active: s.active,
+        // из config:
+        slot_limit:           Number(cfg.slot_limit || 0) || null,
+        per_user_cap_mbps:    Number(cfg.per_user_cap_mbps || 0) || null,
+        per_user_ceil_mbps:   Number(cfg.per_user_ceil_mbps || 0) || null,
+        // агрегаты:
+        assigned_count:       assignedByServer.get(s.id) || 0,
+        live_ips:             liveByServer.get(s.id) || [],
+        created_at: s.created_at
+      };
+    });
+
+    res.json({ ok:true, items });
   } catch (e) {
     console.error('[admin/servers][GET]', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 // POST /admin/servers  { name, host, port, country, bandwidth_mbps }
