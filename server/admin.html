@@ -46,10 +46,36 @@
     <div class="tab active" data-tab="stats">Статистика</div>
     <div class="tab" data-tab="users">Пользователи</div>
     <div class="tab" data-tab="servers">Сервера</div>
+    <div class="tab" data-tab="broadcast">Рассылка</div>
     <button id="btnRefresh" class="right">Обновить</button>
   </div>
 
   <div class="panes">
+    <!-- Рассылка -->
+<section id="pane-broadcast">
+  <div class="toolbar" style="flex-direction:column; align-items:stretch; gap:10px; max-width:720px">
+    <label for="bcText" class="muted">Текст сообщения (plain text)</label>
+    <textarea id="bcText" rows="6" placeholder="Напишите текст для всех пользователей" 
+              style="width:100%; resize:vertical; padding:12px; border-radius:12px; border:1px solid var(--border); background:#0c1220; color:var(--text)"></textarea>
+
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+      <span class="muted" id="bcCount">0 символов</span>
+      <span class="muted">• Отправится всем из базы users</span>
+      <span class="muted">• Предпросмотр отключён, отправка – без форматирования</span>
+    </div>
+
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <button id="btnSendBC" class="primary">Отправить всем</button>
+      <button id="btnClearBC">Очистить</button>
+    </div>
+
+    <div class="muted" style="margin-top:6px">
+      Советы: делайте короткие сообщения; Telegram может ограничивать скорость отправки, 
+      поэтому бэкенд шлёт ~20/сек с паузами.
+    </div>
+  </div>
+</section>
+
     <!-- Статистика -->
     <section id="pane-stats" class="active">
       <div class="cards" id="stats-cards"></div>
@@ -227,6 +253,51 @@
     document.getElementById('svProto').value=''; document.getElementById('svCountry').value='';
     loadServers();
   };
+    // --- Рассылка
+  const bcText = document.getElementById('bcText');
+  const bcCount = document.getElementById('bcCount');
+  const btnSendBC = document.getElementById('btnSendBC');
+  const btnClearBC = document.getElementById('btnClearBC');
+
+  if (bcText && bcCount) {
+    const updateCount = () => { bcCount.textContent = `${bcText.value.length} символов`; };
+    bcText.addEventListener('input', updateCount);
+    updateCount();
+  }
+
+  if (btnClearBC && bcText) {
+    btnClearBC.onclick = () => { bcText.value = ''; bcText.dispatchEvent(new Event('input')); };
+  }
+
+  if (btnSendBC && bcText) {
+    btnSendBC.onclick = async () => {
+      const text = (bcText.value || '').trim();
+      if (!text) return alert('Введите текст сообщения');
+      if (!confirm('Отправить сообщение ВСЕМ пользователям?')) return;
+
+      btnSendBC.disabled = true;
+      btnSendBC.textContent = 'Отправляю...';
+
+      try {
+        const r = await api('/admin/broadcast', {
+          method: 'POST',
+          body: JSON.stringify({ text })
+        });
+        const j = await r.json().catch(()=> ({}));
+        if (!r.ok || !j?.ok) {
+          throw new Error(j?.error || 'server_error');
+        }
+        alert(`Готово: отправлено ${j.sent} / не удалось ${j.failed} из ${j.total}`);
+      } catch (e) {
+        console.error('broadcast', e);
+        alert('Ошибка при отправке: ' + (e?.message || e));
+      } finally {
+        btnSendBC.disabled = false;
+        btnSendBC.textContent = 'Отправить всем';
+      }
+    };
+  }
+
 
   // init
   if (!initData){ alert('Открой эту страницу из Telegram Mini App (нужен initData).'); }
