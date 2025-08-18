@@ -766,7 +766,7 @@ app.post('/api/ref/stats', requireNotBlocked, async (req, res) => {
       amountRub: stats.amountRub,
       incomeRub: stats.incomeRub,
       items: stats.items,
-      + link: `https://t.me/${process.env.BOT_USERNAME || 'tothemoonvpnbot'}?start=ref_${user.id}`
+      link: `https://t.me/${process.env.BOT_USERNAME || 'tothemoonvpnbot'}?start=ref_${user.id}`
     });
   } catch (e) {
     console.error('[ref/stats]', e);
