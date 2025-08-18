@@ -82,6 +82,23 @@ async function ensureSchema() {
     config        jsonb,
     created_at    timestamptz default now()
   );
+    -- Пользователь назначен на конкретный сервер
+  create table if not exists server_allocations (
+    user_id     bigint primary key,
+    server_id   bigint not null references servers(id) on delete cascade,
+    assigned_at timestamptz default now()
+  );
+  create index if not exists idx_alloc_server on server_allocations(server_id);
+
+  -- Текущие подключения по IP (отчёт от VPS-скрипта)
+  create table if not exists server_connections (
+    server_id  bigint not null references servers(id) on delete cascade,
+    ip         inet  not null,
+    seen_at    timestamptz not null default now(),
+    primary key (server_id, ip)
+  );
+  create index if not exists idx_conn_seen on server_connections(seen_at);
+
 
   -- МИГРАЦИИ: добавляем недостающие колонки в уже существующих таблицах
   alter table if exists users         add column if not exists created_at timestamptz default now();
@@ -439,6 +456,60 @@ function addPlanToDate(plan, base = new Date()){
   }
   return d;
 }
+
+// === Автоназначение сервера подписчику ===
+async function pickServerForUser() {
+  // Активные сервера + их лимиты слотов
+  const q = await pool.query(`
+    select s.id, (s.config->>'slot_limit')::int as slot_limit
+    from servers s
+    where s.active is true
+    order by s.created_at asc
+  `);
+  if (!q.rowCount) return null;
+
+  // Текущее заполнение по серверам
+  const fill = await pool.query(`
+    select server_id, count(*)::int as n
+    from server_allocations
+    group by server_id
+  `);
+  const cnt = new Map(fill.rows.map(r => [r.server_id, r.n]));
+
+  // Ищем сервер с наименьшей загрузкой и свободным слотом
+  let best = null, bestLoad = Infinity;
+  for (const s of q.rows) {
+    const used = cnt.get(s.id) || 0;
+    const limit = s.slot_limit || 0;
+    if (limit && used >= limit) continue;
+    if (used < bestLoad) { best = s.id; bestLoad = used; }
+  }
+  return best;
+}
+
+async function ensureUserServer(userId) {
+  // Если уже назначен — проверим актуальность
+  const cur = await pool.query(`select server_id from server_allocations where user_id = $1`, [userId]);
+  if (cur.rowCount) {
+    const sid = cur.rows[0].server_id;
+    const s = await pool.query(`select active, (config->>'slot_limit')::int as slot_limit from servers where id = $1`, [sid]);
+    if (s.rowCount && s.rows[0].active) {
+      const used = (await pool.query(`select count(*)::int as n from server_allocations where server_id = $1`, [sid])).rows[0].n;
+      if (!s.rows[0].slot_limit || used <= s.rows[0].slot_limit) return sid;
+    }
+  }
+  // Выбрать новый сервер и записать
+  const next = await pickServerForUser();
+  if (!next) return null;
+  await pool.query(`
+    insert into server_allocations (user_id, server_id)
+    values ($1,$2)
+    on conflict (user_id) do update set server_id = excluded.server_id, assigned_at = now()
+  `, [userId, next]);
+  return next;
+}
+
+
 async function grantSubscription(userId, plan) {
   const p = normalizePlan(String(plan));
   const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [userId]);
@@ -452,12 +523,17 @@ async function grantSubscription(userId, plan) {
   `, [userId, p, until]);
   const r = await pool.query(`select uuid from vless_clients where user_id = $1`, [userId]);
   const id = r.rowCount ? r.rows[0].uuid : uuidv4();
-  await pool.query(`
+    await pool.query(`
     insert into vless_clients (user_id, uuid, expires_at, label)
     values ($1,$2,$3,$4)
     on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
   `, [userId, id, until, `tg_${userId}`]);
+
+  // Назначить/переобновить сервер пользователю под лимиты
+  await ensureUserServer(userId);
+
   return until;
+
 }
 
 
@@ -702,23 +778,39 @@ app.get('/admin/servers', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /admin/servers  { name, host, port, proto, country, active, notes, config }
+
+// POST /admin/servers  { name, host, port, country, bandwidth_mbps }
 app.post('/admin/servers', requireAdmin, async (req, res) => {
   try {
-    const { name, host, port, proto, country, active, notes, config } = req.body || {};
+    const { name, host, port, country, bandwidth_mbps } = req.body || {};
     if (!name || !host) return res.status(400).json({ ok:false, error:'bad_args' });
+
+    const bw = Number(bandwidth_mbps) || 200;       // по умолчанию 200 Мбит/с
+    const is1g = bw >= 800;                          // считаем 1 Гбит/с от 800+
+    const config = {
+      proto: 'vless',
+      bandwidth_mbps: is1g ? 1000 : 200,
+      slot_limit:     is1g ? 240  : 50,
+      per_user_cap_mbps:  is1g ? 12 : 6,
+      per_user_ceil_mbps: is1g ? 25 : 12
+    };
+
     const q = `
       insert into servers (name, host, port, proto, country, active, notes, config)
-      values ($1,$2,$3,$4,$5,$6,$7,$8)
+      values ($1,$2,$3,$4,$5,true,null,$6)
       returning *
     `;
-    const row = (await pool.query(q, [name, host, port||null, proto||null, country||null, active!==false, notes||null, config||null])).rows[0];
+    const row = (await pool.query(q, [
+      name, host, port||443, 'vless', country||null, config
+    ])).rows[0];
+
     res.json({ ok:true, item: row });
   } catch (e) {
     console.error('[admin/servers][POST]', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 // DELETE /admin/servers/:id
 app.delete('/admin/servers/:id', requireAdmin, async (req, res) => {
@@ -1051,6 +1143,37 @@ app.get('/api/vpn/clients', async (req, res) => {
     res.status(500).json({ error:'server_error' });
   }
 });
+
+// POST /api/vpn/connections  { serverId, secret, ips: ["1.2.3.4", ...] }
+app.post('/api/vpn/connections', async (req, res) => {
+  try {
+    const { serverId, secret, ips } = req.body || {};
+    if (!serverId || !Array.isArray(ips)) return res.status(400).json({ ok:false, error:'bad_args' });
+    if (secret !== (process.env.VPN_REPORT_SECRET || '')) return res.status(403).json({ ok:false, error:'forbidden' });
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const ip of ips) {
+        await client.query(`
+          insert into server_connections (server_id, ip, seen_at)
+          values ($1, $2, now())
+          on conflict (server_id, ip) do update set seen_at = excluded.seen_at
+        `, [serverId, ip]);
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK'); throw e;
+    } finally {
+      client.release();
+    }
+    res.json({ ok:true, updated: ips.length });
+  } catch (e) {
+    console.error('[vpn/connections]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 
 
 
