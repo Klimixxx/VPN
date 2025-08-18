@@ -131,6 +131,8 @@ create table if not exists free_trials (
 
 
 ensureSchema().catch(e => console.error('ensureSchema', e));
+syncTariffsToDb().catch(e => console.error('syncTariffsToDb', e));
+
 
 // Проталкивает CONFIG_TARIFFS в таблицу tariffs (UPSERT по id)
 async function syncTariffsToDb() {
@@ -150,6 +152,15 @@ async function syncTariffsToDb() {
         [t.id, t.code, t.title, t.price_rub, t.duration_days]
       );
     }
+
+    async function getRubPrice(planCode) {
+  const q = await pool.query(
+    `select price_rub from tariffs where code = $1`,
+    [planCode]
+  );
+  return q.rowCount ? Number(q.rows[0].price_rub) : null;
+}
+
     // (опционально) удалить лишние тарифы, которых нет в CONFIG_TARIFFS:
     // const ids = CONFIG_TARIFFS.map(t => t.id);
     // await client.query(`delete from tariffs where not (id = any($1::int[]))`, [ids]);
@@ -336,6 +347,19 @@ app.get('/api/healthz', (req, res) => res.json({ ok: true }));
 app.get('/api/me', requireNotBlocked, async (req, res) => {
   try {
     const user = getUserFromInitData(getInitDataFromReq(req));
+    // Список тарифов из БД (для фронта/мини-аппа)
+app.get('/api/tariffs', async (req, res) => {
+  try {
+    const rows = (await pool.query(
+      `select id, code, title, price_rub, duration_days from tariffs order by id`
+    )).rows;
+    res.json({ ok:true, items: rows });
+  } catch (e) {
+    console.error('[api/tariffs]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 
     // достаём персональный UUID и срок
     const q = await pool.query(
@@ -859,7 +883,11 @@ const user = getUserFromInitData(getInitDataFromReq(req));
   }
 });
 // === CRYPTO (NOWPayments) =============================
-const PLAN_RUB = { '7d':199, '1m':499, '3m':1290, '6m':2290, '12m':3990 };
+async function getRubPrice(planCode) {
+  const q = await pool.query(`select price_rub from tariffs where code = $1`, [planCode]);
+  return q.rowCount ? Number(q.rows[0].price_rub) : null;
+}
+
 const FX_RUB_USD = Number(process.env.FX_RUB_USD || '0.011'); // 1₽ ≈ 0.011$
 const NOWPAY_API = 'https://api.nowpayments.io/v1';
 const NOWPAY_KEY = process.env.NOWPAY_API_KEY || '';
@@ -869,7 +897,9 @@ app.post('/api/pay/crypto/invoice', requireNotBlocked, async (req, res) => {
   try {
     const { plan } = req.body || {};
     const user = getUserFromInitData(getInitDataFromReq(req));
-    const priceRub = PLAN_RUB[plan];
+    const priceRub = await getRubPrice(plan);
+if (!priceRub) return res.status(400).json({ ok:false, error:'invalid_plan' });
+
     if (!priceRub) return res.status(400).json({ error:'invalid_plan' });
 
     const priceUsd = Math.max(0.5, Number((priceRub * FX_RUB_USD).toFixed(2)));
@@ -914,7 +944,9 @@ app.get('/api/pay/crypto/status', requireNotBlocked, async (req, res) => {
       const [t, plan, uid] = String(j.order_id || '').split('|');
       const uidNum = Number(uid);
       if (t === 'sub' && plan && uidNum && uidNum === me.id) {
-        await dbRecordPayment(me.id, plan, 0, PLAN_RUB[plan] || 0);
+        const priceRub = await getRubPrice(plan);
+await dbRecordPayment(me.id, plan, 0, priceRub || 0);
+
         await grantSubscription(me.id, plan);
         return res.json({ ok:true, activated:true });
       }
