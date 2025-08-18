@@ -692,18 +692,22 @@ app.post('/admin/sub/grant', requireAdmin, async (req, res) => {
 });
 
 
-// --- ОТМЕНИТЬ ПОДПИСКУ (делаем неактивной сейчас)
+// --- ОТМЕНИТЬ ПОДПИСКУ (делаем неактивной сейчас) + немедленно инвалидируем VLESS
 app.post('/admin/sub/cancel', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.body || {};
     if (!userId) return res.status(400).json({ ok:false, error:'bad_args' });
+
     await pool.query(`update subscriptions set until = now() - interval '1 second' where user_id = $1`, [userId]);
+    await pool.query(`update vless_clients set expires_at = now() - interval '1 second', updated_at = now() where user_id = $1`, [userId]);
+
     res.json({ ok:true });
   } catch (e) {
     console.error('[admin/sub/cancel]', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 // --- ЗАБЛОКИРОВАТЬ ПОЛЬЗОВАТЕЛЯ
 // POST /admin/block  { userId, reason, until }  (until — ISO-строка или null)
