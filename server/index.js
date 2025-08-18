@@ -338,16 +338,11 @@ async function requireNotBlocked(req, res, next) {
 
 
 
+
 // ===== Health
 app.get('/api/healthz', (req, res) => res.json({ ok: true }));
 
-// ===== Данные для мини-аппа
-// БЫЛО: /api/me отдавал SS (ssUri, password, server...)
-// СТАЛО: /api/me отдаёт VLESS-ссылку и срок подписки
-app.get('/api/me', requireNotBlocked, async (req, res) => {
-  try {
-    const user = getUserFromInitData(getInitDataFromReq(req));
-    // Список тарифов из БД (для фронта/мини-аппа)
+// ===== Tariffs (публичный)
 app.get('/api/tariffs', async (req, res) => {
   try {
     const rows = (await pool.query(
@@ -359,6 +354,15 @@ app.get('/api/tariffs', async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
+
+// ===== Данные для мини-аппа
+// БЫЛО: /api/me отдавал SS (ssUri, password, server...)
+// СТАЛО: /api/me отдаёт VLESS-ссылку и срок подписки
+app.get('/api/me', requireNotBlocked, async (req, res) => {
+  try {
+    const user = getUserFromInitData(getInitDataFromReq(req));
+    // Список тарифов из БД (для фронта/мини-аппа)
 
 
     // достаём персональный UUID и срок
