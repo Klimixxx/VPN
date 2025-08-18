@@ -21,6 +21,16 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }, // для serverless Postgres
 });
+// --- Тарифы по умолчанию (рубли) ---
+// Эти цены будут проталкиваться в БД при старте сервера.
+const CONFIG_TARIFFS = [
+  { id: 1, code: '7d',  title: 'Неделя',     price_rub: 50,   duration_days: 7   },
+  { id: 2, code: '1m',  title: 'Месяц',      price_rub: 99,   duration_days: 30  },
+  { id: 3, code: '3m',  title: '3 месяца',   price_rub: 299,  duration_days: 90  },
+  { id: 4, code: '6m',  title: '6 месяцев',  price_rub: 599,  duration_days: 180 },
+  { id: 5, code: '12m', title: '1 год',      price_rub: 1099, duration_days: 365 },
+];
+
 
 
 async function ensureSchema() {
@@ -89,6 +99,17 @@ async function ensureSchema() {
   update users    set created_at = now() where created_at is null;
   update payments set created_at = now() where created_at is null;
 
+    -- тарифы из БД (рубли)
+  create table if not exists tariffs (
+    id             integer primary key,
+    code           text unique not null,        -- '7d' | '1m' | '3m' | '6m' | '12m'
+    title          text        not null,        -- Человекочитаемое имя
+    price_rub      integer     not null,        -- Цена в ₽
+    duration_days  integer     not null,        -- Длительность в днях
+    updated_at     timestamptz not null default now()
+  );
+
+
     -- vless-клиенты (персональные UUID + срок)
   create table if not exists vless_clients (
     user_id     bigint primary key,
@@ -110,6 +131,39 @@ create table if not exists free_trials (
 
 
 ensureSchema().catch(e => console.error('ensureSchema', e));
+
+// Проталкивает CONFIG_TARIFFS в таблицу tariffs (UPSERT по id)
+async function syncTariffsToDb() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const t of CONFIG_TARIFFS) {
+      await client.query(
+        `insert into tariffs (id, code, title, price_rub, duration_days)
+         values ($1,$2,$3,$4,$5)
+         on conflict (id) do update
+         set code = excluded.code,
+             title = excluded.title,
+             price_rub = excluded.price_rub,
+             duration_days = excluded.duration_days,
+             updated_at = now()`,
+        [t.id, t.code, t.title, t.price_rub, t.duration_days]
+      );
+    }
+    // (опционально) удалить лишние тарифы, которых нет в CONFIG_TARIFFS:
+    // const ids = CONFIG_TARIFFS.map(t => t.id);
+    // await client.query(`delete from tariffs where not (id = any($1::int[]))`, [ids]);
+
+    await client.query('COMMIT');
+    console.log('[tariffs] synced');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('syncTariffsToDb error:', e);
+  } finally {
+    client.release();
+  }
+}
+
 
 // маленькие помощники
 async function dbUpsertUser(u) {
