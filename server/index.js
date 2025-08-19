@@ -893,6 +893,20 @@ app.get('/admin', requireAdmin, (req, res) => {
 app.get('/api/ping', (req, res) => {
   res.json({ ok: true, hasToken: !!process.env.BOT_TOKEN });
 });
+// ==== TEMP DB PING (удалить после диагностики) ====
+app.get('/api/_db_ping', async (req, res) => {
+  try {
+    const r = await pool.query('select 1 as ok');
+    res.json({ ok: true, db: r.rows[0] });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: 'db_error',
+      details: e?.message || String(e)
+    });
+  }
+});
+
 
 // ==== TEMP DEBUG GET (удалить после проверки!) ====
 app.get('/api/_debug_hash', (req, res) => {
