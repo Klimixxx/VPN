@@ -4,7 +4,7 @@ import { Bot } from "grammy";
 const bot = new Bot(process.env.BOT_TOKEN);
 
 // 🌐 Ссылка на твой мини-апп (замени на свой URL)
-const MINI_APP_URL = "https://your-app.vercel.app";
+const MINI_APP_URL = "https://ss-miniapp-frontend.vercel.app";
 
 // Команда /start
 bot.command("start", async (ctx) => {
