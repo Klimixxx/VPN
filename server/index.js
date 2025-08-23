@@ -566,7 +566,7 @@ app.post('/api/sub/claimTrial', requireNotBlocked, async (req, res) => {
     if (active) return res.status(400).json({ ok:false, error:'already_active' });
 
     await pool.query(`insert into free_trials (user_id) values ($1) on conflict do nothing`, [user.id]);
-    await grantSubscription(user.id, 'w'); // 7 дней
+    await grantSubscription(user.id, '1m'); // 30 дней
     res.json({ ok:true });
   } catch (e) {
     console.error('[claimTrial]', e);
