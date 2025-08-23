@@ -73,6 +73,20 @@ export async function notifySubExpiring(userId, daysLeft) {
   });
 }
 
+// 3) Сообщение: подписка уже закончилась
+export async function notifySubExpired(userId) {
+  const text =
+    `❌ Подписка закончилась.\n\n` +
+    `Чтобы продолжить пользоваться VPN без ограничений, активируйте новую подписку в мини-приложении. ` +
+    `Это займёт минуту.`;
+
+  await bot.api.sendMessage(userId, text, {
+    parse_mode: "Markdown",
+    reply_markup: openAppKeyboard(),
+  });
+}
+
+
 // Команда /start — приветствие + кнопка открытия мини-аппа
 bot.command("start", async (ctx) => {
   const first = ctx.from?.first_name ?? "друг";
