@@ -1,7 +1,7 @@
 import { Bot } from "grammy";
 
-// 🔑 Токен бота (получил от BotFather)
-const bot = new Bot(process.env.BOT_TOKEN || "ВСТАВЬ_СЮДА_ТОКЕН");
+// Токен берём из переменной окружения
+const bot = new Bot(process.env.BOT_TOKEN);
 
 // 🌐 Ссылка на твой мини-апп (замени на свой URL)
 const MINI_APP_URL = "https://your-app.vercel.app";
@@ -32,4 +32,3 @@ bot.command("start", async (ctx) => {
 
 // Запуск бота
 bot.start();
-
