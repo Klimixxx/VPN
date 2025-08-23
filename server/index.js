@@ -622,8 +622,9 @@ app.post('/api/sub/claimTrial', requireNotBlocked, async (req, res) => {
   }
 });
 
-// Создать счёт Stars (вызов из мини-аппа)
-// body: { plan: '7d'|'1m'|'3m'|'6m'|'12m' }
+// ===== PAYMENTS START =====
+
+// 1) Stars (как было) — создаёт инвойс в Stars и шлёт его в чат
 app.post('/api/pay/stars', requireNotBlocked, async (req, res) => {
   try {
     const user = getUserFromInitData(getInitDataFromReq(req));
@@ -634,7 +635,6 @@ app.post('/api/pay/stars', requireNotBlocked, async (req, res) => {
     const amount = STARS_PRICE[code]; // Stars
     const payload = `plan=${code};userId=${user.id}`;
 
-    // Отправляем пользователю счёт через Bot API
     await bot.api.sendInvoice({
       chat_id: user.id,
       title: `Подписка VPN — ${code}`,
@@ -647,15 +647,23 @@ app.post('/api/pay/stars', requireNotBlocked, async (req, res) => {
         : undefined,
     });
 
-    // Можно вернуть фронту статус «ок, чек отправлен в чат»
     res.json({ ok: true });
   } catch (e) {
     console.error('[pay/stars]', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
+
+// 2) Card (APays) — создание ордера по их докам:
+//    GET https://apays.io/backend/create_order
+//    params: client_id, order_id, amount(копейки), sign=md5(order_id:amount:secret)
 app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
   try {
+    if (!APAYS_CLIENT || !APAYS_SECRET || String(APAYS_SECRET).length < 10) {
+      return res.status(500).json({ ok:false, error:'apays_config_error', details: 'Set APAYS_CLIENT and APAYS_SECRET in env' });
+    }
+
     const user = getUserFromInitData(getInitDataFromReq(req));
     const plan = String(req.body?.plan || '').trim();
     const tariff = await getTariffByCode(plan);
@@ -667,48 +675,96 @@ app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
     const order_id = `tg${user.id}-${Date.now()}`;
     const sign = md5Hex(`${order_id}:${amountMinor}:${APAYS_SECRET}`);
 
+    // сохраним «черновик» ордера
     await pool.query(`
       insert into apays_orders(order_id, user_id, plan, amount_rub, amount_minor, status)
       values($1,$2,$3,$4,$5,'new')
       on conflict(order_id) do nothing
     `, [order_id, user.id, plan, amountRub, amountMinor]);
 
-    // --- СБОРКА URL ДЛЯ APAYS (оставляем как было) ---
+    // вызываем APays
     const url = new URL('/backend/create_order', APAYS_BASE);
     url.searchParams.set('client_id', APAYS_CLIENT);
     url.searchParams.set('order_id', order_id);
     url.searchParams.set('amount', amountMinor);
     url.searchParams.set('sign', sign);
-    if (APAYS_RETURN_OK)   url.searchParams.set('success_url', APAYS_RETURN_OK + `&order_id=${encodeURIComponent(order_id)}`);
-    if (APAYS_RETURN_FAIL) url.searchParams.set('fail_url',    APAYS_RETURN_FAIL + `&order_id=${encodeURIComponent(order_id)}`);
 
-    // --- НОВЫЙ БЛОК: ЧТЕНИЕ/ЛОГ ОТВЕТА + ПОИСК URL ---
     const r = await fetch(url.toString(), { method:'GET' });
-const text = await r.text();
-let j = {};
-try { j = JSON.parse(text); } catch {}
-console.log('[Apays create_order] status=', r.status, 'body=', text);
+    const text = await r.text();
+    let j = {}; try { j = JSON.parse(text); } catch {}
+    console.log('[Apays create_order] status=', r.status, 'body=', text);
 
-// Сохраним "как есть" в БД
-await pool.query(`update apays_orders set raw_response = $2 where order_id = $1`, [order_id, j]);
+    await pool.query(`update apays_orders set raw_response = $2 where order_id = $1`, [order_id, j]);
 
-// APays при успехе возвращает: { status: true, url: "https://apays.io/pay/..." }
-if (j && j.status === true && j.url) {
-  return res.json({ ok:true, order_id, pay_url: j.url });
-}
+    // По докам успех: { status: true, url: "https://apays.io/pay/..." }
+    if (j && j.status === true && j.url) {
+      return res.json({ ok:true, order_id, pay_url: j.url });
+    }
 
-// Если не успех — вернём расширенную ошибку, чтобы видеть ПРИЧИНУ
-return res.status(500).json({
-  ok: false,
-  error: 'apays_create_failed',
-  detailsRawText: text,
-  detailsParsed: j
+    // Ошибка — вернём тело для наглядности причины (клиент/сумма/подпись)
+    return res.status(500).json({
+      ok: false,
+      error: 'apays_create_failed',
+      detailsRawText: text,
+      detailsParsed: j
+    });
+  } catch (e) {
+    console.error('[pay/card]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
 });
 
 
+// 3) Webhook APays — подтверждение оплаты:
+//    POST с полями order_id, status('approved'|'declined'),
+//    sign=md5(order_id:status:secret)
+app.post('/api/pay/apays-callback', async (req, res) => {
+  try {
+    const { order_id, status, sign } = req.body || {};
+    if (!order_id || !status || !sign) return res.status(400).send('bad');
 
-// Бот подтверждает успешный платеж → активируем подписку
-// body: { userId, plan }
+    const expected = md5Hex(`${order_id}:${status}:${APAYS_SECRET}`);
+    if (expected !== String(sign)) {
+      console.warn('[apays webhook] bad sign', { order_id, status });
+      return res.status(400).send('bad sign');
+    }
+
+    const q = await pool.query(
+      `select user_id, plan, amount_rub, status as st from apays_orders where order_id = $1`,
+      [order_id]
+    );
+    if (!q.rowCount) return res.status(404).send('not found');
+
+    if (q.rows[0].st === 'paid') return res.status(200).send('ok'); // уже обработан
+
+    const st = String(status).toLowerCase();
+    if (st === 'approved') {
+      await pool.query(
+        `update apays_orders set status='paid', paid_at=now() where order_id=$1`,
+        [order_id]
+      );
+      const { user_id, plan, amount_rub } = q.rows[0];
+
+      // записываем платёж (в рублях) и выдаём подписку
+      await dbRecordPayment(user_id, plan, 0, amount_rub);
+      await grantSubscription(user_id, plan);
+
+      return res.status(200).send('ok');
+    } else {
+      await pool.query(
+        `update apays_orders set status='failed' where order_id=$1`,
+        [order_id]
+      );
+      return res.status(200).send('ok');
+    }
+  } catch (e) {
+    console.error('[apays webhook] error', e);
+    return res.status(500).send('server error');
+  }
+});
+
+
+// 4) Подтверждение Stars от бота (как было)
 app.post('/api/pay/confirm', async (req, res) => {
   try {
     const { userId, plan } = req.body || {};
@@ -727,6 +783,37 @@ app.post('/api/pay/confirm', async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
+// (Опц.) Поллинг статуса у APays, если вебхук не пришёл:
+app.get('/api/pay/card/status', async (req, res) => {
+  try {
+    const { order_id } = req.query || {};
+    if (!order_id) return res.status(400).json({ ok:false, error:'missing_order_id' });
+
+    const sign = md5Hex(`${order_id}:${APAYS_SECRET}`);
+    const u = new URL('/backend/get_order', APAYS_BASE);
+    u.searchParams.set('client_id', APAYS_CLIENT);
+    u.searchParams.set('order_id', order_id);
+    u.searchParams.set('sign', sign);
+
+    const r = await fetch(u.toString(), { method:'GET' });
+    const text = await r.text();
+    let j = {}; try { j = JSON.parse(text); } catch {}
+    console.log('[Apays get_order] status=', r.status, 'body=', text);
+
+    if (j && j.status === true) {
+      // order_status: pending | approve | decline | expired
+      return res.json({ ok:true, order_status: j.order_status });
+    }
+    return res.status(500).json({ ok:false, error:'apays_status_failed', detailsRawText: text, detailsParsed: j });
+  } catch (e) {
+    console.error('[pay/card/status]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// ===== PAYMENTS END =====
+
 
 
 
