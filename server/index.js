@@ -18,6 +18,21 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
+// ===== Apays config =====
+const SITE_URL        = process.env.SITE_URL || 'https://ss-miniapp-frontend.vercel.app';
+const APAYS_BASE      = process.env.APAYS_BASE   || 'https://apays.io';
+const APAYS_CLIENT    = Number(process.env.APAYS_CLIENT || '123'); // твой client_id из кабинета Apays
+const APAYS_SECRET    = process.env.APAYS_SECRET || 'your_secret'; // токен, который тебе выдали
+const APAYS_RETURN_OK = process.env.APAYS_RETURN_OK || `${SITE_URL}/?paid=1`;
+const APAYS_RETURN_FAIL=process.env.APAYS_RETURN_FAIL|| `${SITE_URL}/?paid=0`;
+
+const md5Hex = (s)=> crypto.createHash('md5').update(s).digest('hex');
+
+async function getTariffByCode(code){
+  const q = await pool.query(`select code, title, price_rub from tariffs where code = $1`, [code]);
+  return q.rows[0] || null;
+}
+
 // === DB (Neon Postgres) ======================================
 import pkg from 'pg';
 const { Pool } = pkg;
@@ -632,7 +647,14 @@ app.post('/api/pay/stars', requireNotBlocked, async (req, res) => {
         : undefined,
     });
 
-    // Card (Apays) — создание заказа
+    // Можно вернуть фронту статус «ок, чек отправлен в чат»
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[pay/stars]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+// Card (Apays) — создание заказа
 app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
   try {
     const user = getUserFromInitData(getInitDataFromReq(req));
@@ -681,13 +703,7 @@ app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
 });
 
 
-    // Можно вернуть фронту статус «ок, чек отправлен в чат»
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('[pay/stars]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
-  }
-});
+
 // Бот подтверждает успешный платеж → активируем подписку
 // body: { userId, plan }
 app.post('/api/pay/confirm', async (req, res) => {
