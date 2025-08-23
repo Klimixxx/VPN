@@ -684,32 +684,27 @@ app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
 
     // --- НОВЫЙ БЛОК: ЧТЕНИЕ/ЛОГ ОТВЕТА + ПОИСК URL ---
     const r = await fetch(url.toString(), { method:'GET' });
-    const text = await r.text();
-    let j = {};
-    try { j = JSON.parse(text); } catch {}
-    console.log('[Apays create_order] status=', r.status, 'body=', text);
+const text = await r.text();
+let j = {};
+try { j = JSON.parse(text); } catch {}
+console.log('[Apays create_order] status=', r.status, 'body=', text);
 
-    await pool.query(`update apays_orders set raw_response = $2 where order_id = $1`, [order_id, j]);
+// Сохраним "как есть" в БД
+await pool.query(`update apays_orders set raw_response = $2 where order_id = $1`, [order_id, j]);
 
-    const payUrl =
-      j.pay_url ||
-      j.url ||
-      j.payment_url ||
-      j.checkout_url ||
-      j.redirect_url ||
-      (j.data && (j.data.pay_url || j.data.url || j.data.payment_url || j.data.checkout_url || j.data.redirect_url)) ||
-      (j.result && (j.result.pay_url || j.result.url || j.result.payment_url || j.result.checkout_url || j.result.redirect_url));
+// APays при успехе возвращает: { status: true, url: "https://apays.io/pay/..." }
+if (j && j.status === true && j.url) {
+  return res.json({ ok:true, order_id, pay_url: j.url });
+}
 
-    if (!payUrl) {
-      return res.status(500).json({ ok:false, error:'apays_no_payurl', details: j });
-    }
-
-    res.json({ ok:true, order_id, pay_url: payUrl });
-  } catch (e) {
-    console.error('[pay/card]', e);
-    res.status(500).json({ ok:false, error:'server_error' });
-  }
+// Если не успех — вернём расширенную ошибку, чтобы видеть ПРИЧИНУ
+return res.status(500).json({
+  ok: false,
+  error: 'apays_create_failed',
+  detailsRawText: text,
+  detailsParsed: j
 });
+
 
 
 // Бот подтверждает успешный платеж → активируем подписку
