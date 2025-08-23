@@ -157,6 +157,18 @@ create table if not exists free_trials (
   user_id     bigint primary key,
   claimed_at  timestamptz default now()
 );
+  create table if not exists apays_orders (
+    order_id     text primary key,
+    user_id      bigint not null,
+    plan         text   not null,
+    amount_rub   integer not null,
+    amount_minor integer not null,
+    status       text   not null default 'new',
+    raw_response jsonb,
+    created_at   timestamptz default now(),
+    paid_at      timestamptz
+  );
+
 
   create table if not exists sub_notifications (
     user_id   bigint not null,
@@ -619,6 +631,55 @@ app.post('/api/pay/stars', requireNotBlocked, async (req, res) => {
         ? process.env.MINI_APP_URL + "/free-icon-vpn-7517284.png"
         : undefined,
     });
+
+    // Card (Apays) — создание заказа
+app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
+  try {
+    const user = getUserFromInitData(getInitDataFromReq(req));
+    const plan = String(req.body?.plan || '').trim();
+    const tariff = await getTariffByCode(plan);
+    if (!tariff) return res.status(400).json({ ok:false, error:'bad_plan' });
+
+    const amountRub   = Number(tariff.price_rub);
+    const amountMinor = amountRub * 100; // копейки
+
+    const order_id = `tg${user.id}-${Date.now()}`;
+    const sign = md5Hex(`${order_id}:${amountMinor}:${APAYS_SECRET}`);
+
+    // сохраняем заказ в БД
+    await pool.query(`
+      insert into apays_orders(order_id, user_id, plan, amount_rub, amount_minor, status)
+      values($1,$2,$3,$4,$5,'new')
+      on conflict(order_id) do nothing
+    `, [order_id, user.id, plan, amountRub, amountMinor]);
+
+    // запрос в Apays
+    const url = new URL('/backend/create_order', APAYS_BASE);
+    url.searchParams.set('client_id', APAYS_CLIENT);
+    url.searchParams.set('order_id', order_id);
+    url.searchParams.set('amount', amountMinor);
+    url.searchParams.set('sign', sign);
+
+    if (APAYS_RETURN_OK)   url.searchParams.set('success_url', APAYS_RETURN_OK + `&order_id=${encodeURIComponent(order_id)}`);
+    if (APAYS_RETURN_FAIL) url.searchParams.set('fail_url',    APAYS_RETURN_FAIL + `&order_id=${encodeURIComponent(order_id)}`);
+
+    const r = await fetch(url.toString(), { method:'GET' });
+    const j = await r.json().catch(()=> ({}));
+
+    await pool.query(`update apays_orders set raw_response = $2 where order_id = $1`, [order_id, j]);
+
+    const payUrl = j.pay_url || j.url || j.payment_url;
+    if (!payUrl) {
+      return res.status(500).json({ ok:false, error:'apays_no_payurl', details:j });
+    }
+
+    res.json({ ok:true, order_id, pay_url: payUrl });
+  } catch (e) {
+    console.error('[pay/card]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 
     // Можно вернуть фронту статус «ок, чек отправлен в чат»
     res.json({ ok: true });
