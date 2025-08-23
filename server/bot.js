@@ -104,6 +104,43 @@ bot.command("start", async (ctx) => {
   });
 });
 
+// 1) Подтверждаем оплату (обязательно), иначе Telegram отменит платёж
+bot.on("pre_checkout_query", async (ctx) => {
+  try {
+    await ctx.answerPreCheckoutQuery(true);
+  } catch (e) {
+    console.error("[pre_checkout_query]", e?.description || e?.message || e);
+  }
+});
+
+// 2) Успешная оплата Stars → активируем подписку через backend
+bot.on("message:successful_payment", async (ctx) => {
+  try {
+    const sp = ctx.message.successful_payment;
+    const payload = sp.invoice_payload || ""; // вида: "plan=1m;userId=123"
+    const p = Object.fromEntries(
+      payload.split(";").map(s => s.split("=").map(x => (x || "").trim()))
+    );
+    const plan = p.plan || "1m";
+    const userId = Number(p.userId || ctx.from.id);
+
+    // Дергаем наш backend, который активирует подписку
+    const api = process.env.API_URL; // добавь переменную окружения на Render
+    if (api) {
+      await fetch(api + "/api/pay/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-From-Bot": "1" },
+        body: JSON.stringify({ userId, plan })
+      });
+    }
+
+    await ctx.reply("✅ Платёж получен! Подписка активирована. Откройте мини-приложение и подключитесь к VPN.");
+  } catch (e) {
+    console.error("[successful_payment]", e?.description || e?.message || e);
+  }
+});
+
+
 // Сначала снимаем webhook (важно для деплоя/рестартов), потом запускаем long polling
 try {
   await bot.api.deleteWebhook({ drop_pending_updates: true });
