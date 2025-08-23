@@ -10,7 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ← сюда вставляем запуск бота
 import "./bot.js";
-import { notifySubActivated, notifySubExpiring, notifySubExpired } from "./bot.js";
+import { bot, notifySubActivated, notifySubExpiring, notifySubExpired } from "./bot.js";
 
 
 
@@ -35,6 +35,16 @@ const CONFIG_TARIFFS = [
   { id: 4, code: '6m',  title: '6 месяцев',  price_rub: 599,  duration_days: 180 },
   { id: 5, code: '12m', title: '1 год',      price_rub: 1099, duration_days: 365 },
 ];
+
+// Цена каждого плана в Stars (XTR). Можно менять как захочешь.
+const STARS_PRICE = {
+  '7d': 50,
+  '1m': 390,
+  '3m': 990,
+  '6m': 1790,
+  '12m': 2990
+};
+
 
 
 
@@ -582,6 +592,59 @@ app.post('/api/sub/claimTrial', requireNotBlocked, async (req, res) => {
   } catch (e) {
     console.error('[claimTrial]', e);
     res.status(401).json({ ok:false, error: 'initData verification failed' });
+  }
+});
+
+// Создать счёт Stars (вызов из мини-аппа)
+// body: { plan: '7d'|'1m'|'3m'|'6m'|'12m' }
+app.post('/api/pay/stars', requireNotBlocked, async (req, res) => {
+  try {
+    const user = getUserFromInitData(getInitDataFromReq(req));
+    const { plan } = req.body || {};
+    const code = String(plan || '').trim();
+    if (!STARS_PRICE[code]) return res.status(400).json({ ok:false, error:'bad_plan' });
+
+    const amount = STARS_PRICE[code]; // Stars
+    const payload = `plan=${code};userId=${user.id}`;
+
+    // Отправляем пользователю счёт через Bot API
+    await bot.api.sendInvoice({
+      chat_id: user.id,
+      title: `Подписка VPN — ${code}`,
+      description: `Оплата тарифа ${code.toUpperCase()}`,
+      payload,
+      currency: "XTR", // Telegram Stars
+      prices: [{ label: code.toUpperCase(), amount }],
+      photo_url: process.env.MINI_APP_URL
+        ? process.env.MINI_APP_URL + "/free-icon-vpn-7517284.png"
+        : undefined,
+    });
+
+    // Можно вернуть фронту статус «ок, чек отправлен в чат»
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[pay/stars]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+// Бот подтверждает успешный платеж → активируем подписку
+// body: { userId, plan }
+app.post('/api/pay/confirm', async (req, res) => {
+  try {
+    const { userId, plan } = req.body || {};
+    if (!userId || !plan) return res.status(400).json({ ok:false, error:'bad_args' });
+
+    const code = String(plan).trim();
+    const until = await grantSubscription(Number(userId), code);
+
+    // запишем платёж с amount_stars
+    const stars = STARS_PRICE[code] || 0;
+    await dbRecordPayment(Number(userId), code, stars, 0);
+
+    res.json({ ok:true, until });
+  } catch (e) {
+    console.error('[pay/confirm]', e);
+    res.status(500).json({ ok:false, error:'server_error' });
   }
 });
 
