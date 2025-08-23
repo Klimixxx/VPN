@@ -654,7 +654,6 @@ app.post('/api/pay/stars', requireNotBlocked, async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
-// Card (Apays) — создание заказа
 app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
   try {
     const user = getUserFromInitData(getInitDataFromReq(req));
@@ -668,31 +667,41 @@ app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
     const order_id = `tg${user.id}-${Date.now()}`;
     const sign = md5Hex(`${order_id}:${amountMinor}:${APAYS_SECRET}`);
 
-    // сохраняем заказ в БД
     await pool.query(`
       insert into apays_orders(order_id, user_id, plan, amount_rub, amount_minor, status)
       values($1,$2,$3,$4,$5,'new')
       on conflict(order_id) do nothing
     `, [order_id, user.id, plan, amountRub, amountMinor]);
 
-    // запрос в Apays
+    // --- СБОРКА URL ДЛЯ APAYS (оставляем как было) ---
     const url = new URL('/backend/create_order', APAYS_BASE);
     url.searchParams.set('client_id', APAYS_CLIENT);
     url.searchParams.set('order_id', order_id);
     url.searchParams.set('amount', amountMinor);
     url.searchParams.set('sign', sign);
-
     if (APAYS_RETURN_OK)   url.searchParams.set('success_url', APAYS_RETURN_OK + `&order_id=${encodeURIComponent(order_id)}`);
     if (APAYS_RETURN_FAIL) url.searchParams.set('fail_url',    APAYS_RETURN_FAIL + `&order_id=${encodeURIComponent(order_id)}`);
 
+    // --- НОВЫЙ БЛОК: ЧТЕНИЕ/ЛОГ ОТВЕТА + ПОИСК URL ---
     const r = await fetch(url.toString(), { method:'GET' });
-    const j = await r.json().catch(()=> ({}));
+    const text = await r.text();
+    let j = {};
+    try { j = JSON.parse(text); } catch {}
+    console.log('[Apays create_order] status=', r.status, 'body=', text);
 
     await pool.query(`update apays_orders set raw_response = $2 where order_id = $1`, [order_id, j]);
 
-    const payUrl = j.pay_url || j.url || j.payment_url;
+    const payUrl =
+      j.pay_url ||
+      j.url ||
+      j.payment_url ||
+      j.checkout_url ||
+      j.redirect_url ||
+      (j.data && (j.data.pay_url || j.data.url || j.data.payment_url || j.data.checkout_url || j.data.redirect_url)) ||
+      (j.result && (j.result.pay_url || j.result.url || j.result.payment_url || j.result.checkout_url || j.result.redirect_url));
+
     if (!payUrl) {
-      return res.status(500).json({ ok:false, error:'apays_no_payurl', details:j });
+      return res.status(500).json({ ok:false, error:'apays_no_payurl', details: j });
     }
 
     res.json({ ok:true, order_id, pay_url: payUrl });
@@ -701,7 +710,6 @@ app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
-
 
 
 // Бот подтверждает успешный платеж → активируем подписку
