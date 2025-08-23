@@ -7,14 +7,14 @@
   "scripts": {
     "start": "node index.js"
   },
- "dependencies": {
-  "cors": "^2.8.5",
-  "express": "^4.19.2",
-  "pg": "^8.11.3",
-  "uuid": "^9.0.1",
-  "grammy": "^1.24.0",
-  "dotenv": "^16.4.5"
-}
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "pg": "^8.11.3",
+    "uuid": "^9.0.1",
+    "grammy": "^1.24.0",
+    "dotenv": "^16.4.5"
+  },
   "engines": {
     "node": ">=18"
   }
