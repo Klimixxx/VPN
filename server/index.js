@@ -10,6 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ← сюда вставляем запуск бота
 import "./bot.js";
+import { notifySubActivated, notifySubExpiring } from "./bot.js";
+
 
 const app = express();
 app.use(express.json());
@@ -143,6 +145,15 @@ async function ensureSchema() {
 create table if not exists free_trials (
   user_id     bigint primary key,
   claimed_at  timestamptz default now()
+);
+
+create table if not exists sub_notifications (
+    user_id   bigint not null,
+    kind      text   not null, -- '3d' | '1d'
+    for_until date   not null, -- дата истечения, к которой относится нотификация
+    sent_at   timestamptz default now(),
+    primary key (user_id, kind, for_until)
+  
 );
 
   `);
@@ -533,6 +544,13 @@ async function grantSubscription(userId, plan) {
 
   // Назначить/переобновить сервер пользователю под лимиты
   await ensureUserServer(userId);
+
+  // Уведомление о активации подписки в Telegram
+  try {
+    await notifySubActivated(userId, until.toISOString());
+  } catch (e) {
+    console.error('notifySubActivated', e);
+  }
 
   return until;
 
@@ -1263,6 +1281,80 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
+async function runExpiryNotifierOnce() {
+  // Кого предупредить за 3 дня
+  const q3 = await pool.query(`
+    with c as (
+      select user_id, date(until) as d
+      from subscriptions
+      where until is not null
+        and until > now()
+        and date(until) = date(now() + interval '3 days')
+    )
+    select c.user_id, c.d
+    from c
+    left join sub_notifications n
+      on n.user_id = c.user_id and n.kind = '3d' and n.for_until = c.d
+    where n.user_id is null
+  `);
+
+  for (const row of q3.rows) {
+    try {
+      await notifySubExpiring(row.user_id, 3);               // ← шлём «за 3 дня»
+      await pool.query(
+        `insert into sub_notifications (user_id, kind, for_until)
+         values ($1,'3d',$2) on conflict do nothing`,
+        [row.user_id, row.d]
+      );
+    } catch (e) {
+      console.error("notify 3d", e);
+    }
+  }
+
+  // Кого предупредить за 1 день (текст «завтра»)
+  const q1 = await pool.query(`
+    with c as (
+      select user_id, date(until) as d
+      from subscriptions
+      where until is not null
+        and until > now()
+        and date(until) = date(now() + interval '1 day')
+    )
+    select c.user_id, c.d
+    from c
+    left join sub_notifications n
+      on n.user_id = c.user_id and n.kind = '1d' and n.for_until = c.d
+    where n.user_id is null
+  `);
+
+  for (const row of q1.rows) {
+    try {
+      await notifySubExpiring(row.user_id, 1);               // ← шлём «за 1 день»
+      await pool.query(
+        `insert into sub_notifications (user_id, kind, for_until)
+         values ($1,'1d',$2) on conflict do nothing`,
+        [row.user_id, row.d]
+      );
+    } catch (e) {
+      console.error("notify 1d", e);
+    }
+  }
+}
+
+// Запускаем сразу и повторяем каждый час
+function startExpiryNotifier() {
+  runExpiryNotifierOnce().catch(console.error);
+  setInterval(
+    () => runExpiryNotifierOnce().catch(console.error),
+    60 * 60 * 1000 // раз в час
+  );
+}
+
+// Инициализация БД и запуск планировщика
+await ensureSchema();
+startExpiryNotifier();
+
+
 app.listen(PORT, () => console.log('API listening on', PORT));
 
   
