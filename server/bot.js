@@ -88,5 +88,20 @@ bot.command("start", async (ctx) => {
   });
 });
 
-// Запуск long polling
-bot.start();
+// Сначала снимаем webhook (важно для деплоя/рестартов), потом запускаем long polling
+try {
+  await bot.api.deleteWebhook({ drop_pending_updates: true });
+} catch (e) {
+  console.warn('deleteWebhook warn:', e?.description || e?.message || e);
+}
+
+bot.start({ onStart: () => console.log('Bot started (long polling)') })
+  .catch((e) => {
+    // Если вдруг race-condition и уже есть активный getUpdates — не валим процесс
+    if (String(e?.description || e).includes('terminated by other getUpdates')) {
+      console.warn('Bot start warning: another getUpdates in progress, will keep API running');
+    } else {
+      throw e; // любые другие ошибки — пусть падают, чтобы мы их увидели в логах
+    }
+  });
+
