@@ -27,19 +27,21 @@ export async function notifySubActivated(userId, untilISO) {
   const until = new Date(untilISO);
   const dateStr = until.toLocaleDateString("ru-RU", {
     day: "2-digit",
-    month: "long",
+    month: "2-digit",
+    year: "numeric",
   });
 
   const text =
     `✅ Подписка активирована!\n\n` +
-    `Доступ открыт до *${dateStr}*.\n\n` +
-    `Если что-то пойдёт не так — открывай мини-апп, там всё под рукой.`;
+    `Подписка активна до *${dateStr}*.\n\n` +
+    `Теперь ваш сервер снова доступен вам! Перейдите в приложение V2Box и подключитесь к VPN`;
 
   await bot.api.sendMessage(userId, text, {
     parse_mode: "Markdown",
     reply_markup: openAppKeyboard(),
   });
 }
+
 
 /**
  * Уведомление: подписка скоро заканчивается (за 3 дня / за 1 день)
