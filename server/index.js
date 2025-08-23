@@ -160,8 +160,6 @@ create table if not exists sub_notifications (
 }
 
 
-ensureSchema().catch(e => console.error('ensureSchema', e));
-syncTariffsToDb().catch(e => console.error('syncTariffsToDb', e));
 
 
 // Проталкивает CONFIG_TARIFFS в таблицу tariffs (UPSERT по id)
@@ -183,13 +181,7 @@ async function syncTariffsToDb() {
       );
     }
 
-    async function getRubPrice(planCode) {
-  const q = await pool.query(
-    `select price_rub from tariffs where code = $1`,
-    [planCode]
-  );
-  return q.rowCount ? Number(q.rows[0].price_rub) : null;
-}
+  
 
     // (опционально) удалить лишние тарифы, которых нет в CONFIG_TARIFFS:
     // const ids = CONFIG_TARIFFS.map(t => t.id);
