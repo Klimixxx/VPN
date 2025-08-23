@@ -1196,7 +1196,7 @@ async function getRubPrice(planCode) {
 const FX_RUB_USD = Number(process.env.FX_RUB_USD || '0.011'); // 1₽ ≈ 0.011$
 const NOWPAY_API = 'https://api.nowpayments.io/v1';
 const NOWPAY_KEY = process.env.NOWPAY_API_KEY || '';
-const SITE_URL   = process.env.SITE_URL || 'https://your-domain.example';
+
 
 app.post('/api/pay/crypto/invoice', requireNotBlocked, async (req, res) => {
   try {
