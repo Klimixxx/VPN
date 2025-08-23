@@ -10,7 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ← сюда вставляем запуск бота
 import "./bot.js";
-import { notifySubActivated, notifySubExpiring } from "./bot.js";
+import { notifySubActivated, notifySubExpiring, notifySubExpired } from "./bot.js";
+
 
 
 const app = express();
@@ -147,16 +148,15 @@ create table if not exists free_trials (
   claimed_at  timestamptz default now()
 );
 
-create table if not exists sub_notifications (
+  create table if not exists sub_notifications (
     user_id   bigint not null,
-    kind      text   not null, -- '3d' | '1d'
+    kind      text   not null, -- '3d' | '1d' | 'expired'
     for_until date   not null, -- дата истечения, к которой относится нотификация
     sent_at   timestamptz default now(),
     primary key (user_id, kind, for_until)
-  
-);
+  )
+`);
 
-  `);
 }
 
 
@@ -676,32 +676,15 @@ app.post('/admin/sub/grant', requireAdmin, async (req, res) => {
     const { userId, plan } = req.body || {};
     if (!userId || !plan) return res.status(400).json({ ok:false, error:'bad_args' });
 
-    const cur = await pool.query(`select plan, until from subscriptions where user_id = $1`, [userId]);
-    const base = (cur.rowCount && cur.rows[0].until && new Date(cur.rows[0].until) > new Date())
-      ? new Date(cur.rows[0].until) : new Date();
-    const until = addPlanToDate(plan, base);
-
-    await pool.query(`
-      insert into subscriptions (user_id, plan, until)
-      values ($1,$2,$3)
-      on conflict (user_id) do update set plan = excluded.plan, until = excluded.until
-    `, [userId, plan, until]);
-
-    // === VLESS upsert — ДОЛЖЕН быть в try и ДО ответа
-    const r2 = await pool.query(`select uuid from vless_clients where user_id = $1`, [userId]);
-    const id2 = r2.rowCount ? r2.rows[0].uuid : uuidv4();
-    await pool.query(`
-      insert into vless_clients (user_id, uuid, expires_at, label)
-      values ($1,$2,$3,$4)
-      on conflict (user_id) do update set expires_at = excluded.expires_at, updated_at = now()
-    `, [userId, id2, until, `tg_${userId}`]);
-
+    const until = await grantSubscription(Number(userId), String(plan));
+    // grantSubscription уже сам шлёт notifySubActivated
     res.json({ ok:true, until });
   } catch (e) {
     console.error('[admin/sub/grant]', e);
     res.status(500).json({ ok:false, error:'server_error' });
   }
 });
+
 
 
 // --- ОТМЕНИТЬ ПОДПИСКУ (делаем неактивной сейчас) + немедленно инвалидируем VLESS
@@ -713,6 +696,8 @@ app.post('/admin/sub/cancel', requireAdmin, async (req, res) => {
     await pool.query(`update subscriptions set until = now() - interval '1 second' where user_id = $1`, [userId]);
     await pool.query(`update vless_clients set expires_at = now() - interval '1 second', updated_at = now() where user_id = $1`, [userId]);
 
+    
+        try { await notifySubExpired(Number(userId)); } catch (e) { console.error('notifySubExpired', e); }
     res.json({ ok:true });
   } catch (e) {
     console.error('[admin/sub/cancel]', e);
@@ -1331,6 +1316,34 @@ async function runExpiryNotifierOnce() {
       console.error("notify 1d", e);
     }
   }
+    // Кого уведомить, что подписка уже ИСТЕКЛА (один раз)
+  const q0 = await pool.query(`
+    with c as (
+      select user_id, date(until) as d
+      from subscriptions
+      where until is not null
+        and until <= now()
+    )
+    select c.user_id, c.d
+    from c
+    left join sub_notifications n
+      on n.user_id = c.user_id and n.kind = 'expired' and n.for_until = c.d
+    where n.user_id is null
+  `);
+
+  for (const row of q0.rows) {
+    try {
+      await notifySubExpired(row.user_id);
+      await pool.query(
+        `insert into sub_notifications (user_id, kind, for_until)
+         values ($1,'expired',$2) on conflict do nothing`,
+        [row.user_id, row.d]
+      );
+    } catch (e) {
+      console.error("notify expired", e);
+    }
+  }
+
 }
 
 // Запускаем сразу и повторяем каждый час
