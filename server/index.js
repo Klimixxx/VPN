@@ -683,7 +683,7 @@ const sign = md5Hex(`${order_id}:${amountToSend}:${APAYS_SECRET}`);
       insert into apays_orders(order_id, user_id, plan, amount_rub, amount_minor, status)
       values($1,$2,$3,$4,$5,'new')
       on conflict(order_id) do nothing
-    `, [order_id, user.id, plan, amountRub, amountMinor]);
+    `, [order_id, user.id, plan, amountRub, Math.round(amountRub * 100)]);
 
     // вызываем APays
     const url = new URL('/backend/create_order', APAYS_BASE);
