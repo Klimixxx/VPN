@@ -670,7 +670,7 @@ app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
     if (!tariff) return res.status(400).json({ ok:false, error:'bad_plan' });
 
     const amountRub   = Number(tariff.price_rub);
-const amountToSend = amountRub; // ⬅️ отправляем в РУБЛЯХ
+const amountToSend = Math.round(amountRub * 100); // ⬅️ КОПЕЙКИ
 
 const order_id = `tg${user.id}-${Date.now()}`;
 const sign = md5Hex(`${order_id}:${amountToSend}:${APAYS_SECRET}`);
