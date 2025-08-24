@@ -670,10 +670,13 @@ app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
     if (!tariff) return res.status(400).json({ ok:false, error:'bad_plan' });
 
     const amountRub   = Number(tariff.price_rub);
-    const amountMinor = amountRub * 100; // копейки
+const amountToSend = amountRub; // ⬅️ отправляем в РУБЛЯХ
 
-    const order_id = `tg${user.id}-${Date.now()}`;
-    const sign = md5Hex(`${order_id}:${amountMinor}:${APAYS_SECRET}`);
+const order_id = `tg${user.id}-${Date.now()}`;
+const sign = md5Hex(`${order_id}:${amountToSend}:${APAYS_SECRET}`);
+
+    console.log('[Apays create_order params]', { client_id: APAYS_CLIENT, order_id, amountToSend, sign });
+
 
     // сохраним «черновик» ордера
     await pool.query(`
@@ -686,7 +689,7 @@ app.post('/api/pay/card', requireNotBlocked, async (req, res) => {
     const url = new URL('/backend/create_order', APAYS_BASE);
     url.searchParams.set('client_id', APAYS_CLIENT);
     url.searchParams.set('order_id', order_id);
-    url.searchParams.set('amount', amountMinor);
+    url.searchParams.set('amount', amountToSend);
     url.searchParams.set('sign', sign);
 
     const r = await fetch(url.toString(), { method:'GET' });
