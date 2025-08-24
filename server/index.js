@@ -21,7 +21,9 @@ app.use(express.urlencoded({ extended: false }));
 // ===== Apays config =====
 const SITE_URL        = process.env.SITE_URL || 'https://ss-miniapp-frontend.vercel.app';
 const APAYS_BASE      = process.env.APAYS_BASE   || 'https://apays.io';
-const APAYS_CLIENT    = Number(process.env.APAYS_CLIENT || '123'); // твой client_id из кабинета Apays
+// раньше: const APAYS_CLIENT = Number(process.env.APAYS_CLIENT || '123');
+const APAYS_CLIENT = Number(process.env.APAYS_CLIENT ?? process.env.APAYS_CLIENT_ID ?? '0');
+console.log('[APAYS CONFIG]', { client: APAYS_CLIENT, secretLen: (process.env.APAYS_SECRET||'').length });
 const APAYS_SECRET    = process.env.APAYS_SECRET || 'your_secret'; // токен, который тебе выдали
 const APAYS_RETURN_OK = process.env.APAYS_RETURN_OK || `${SITE_URL}/?paid=1`;
 const APAYS_RETURN_FAIL=process.env.APAYS_RETURN_FAIL|| `${SITE_URL}/?paid=0`;
