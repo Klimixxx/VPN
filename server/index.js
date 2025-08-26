@@ -30,6 +30,9 @@ const APAYS_RETURN_FAIL=process.env.APAYS_RETURN_FAIL|| `${SITE_URL}/?paid=0`;
 
 const md5Hex = (s)=> crypto.createHash('md5').update(s).digest('hex');
 
+const rnd = (n = 32) => crypto.randomBytes(n).toString('hex');
+
+
 async function getTariffByCode(code){
   const q = await pool.query(`select code, title, price_rub from tariffs where code = $1`, [code]);
   return q.rows[0] || null;
@@ -185,6 +188,19 @@ create table if not exists free_trials (
     created_at   timestamptz default now(),
     paid_at      timestamptz
   );
+
+  create table if not exists devices (
+  device_id    text primary key,      -- строка с iOS identifierForVendor
+  device_name  text,                  -- человекочитаемое имя (например, "iPhone 14")
+  user_id      bigint,                -- Telegram user_id (появится после confirm)
+  linked_at    timestamptz,           -- когда подтверждена привязка
+  token        text,                  -- секрет для iOS (см. ниже)
+  nonce        text,                  -- одноразовый код во время процесса привязки
+  created_at   timestamptz default now(),
+  updated_at   timestamptz default now()
+);
+create index if not exists idx_devices_user on devices(user_id);
+
 
 
   create table if not exists sub_notifications (
@@ -398,6 +414,60 @@ async function requireNotBlocked(req, res, next) {
 
 
 
+// ===== Device linking (start) — iOS/Android → сервер генерирует nonce+token
+app.post('/api/link/start', async (req, res) => {
+  try {
+    const { device_id, device_name } = req.body || {};
+    if (!device_id) return res.status(400).json({ ok:false, error:'device_id_required' });
+
+    const nonce = rnd(16);
+    const token = rnd(32); // device_token, хранится на устройстве и шлётся потом в /api/app/me
+
+    await pool.query(`
+      insert into devices (device_id, device_name, nonce, token, updated_at)
+      values ($1,$2,$3,$4, now())
+      on conflict (device_id) do update
+        set device_name = excluded.device_name,
+            nonce       = excluded.nonce,
+            token       = excluded.token,
+            updated_at  = now()
+    `, [device_id, device_name || null, nonce, token]);
+
+    res.json({ ok:true, nonce, device_token: token });
+  } catch (e) {
+    console.error('/api/link/start', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// ===== Device linking (confirm) — мини-апп подтверждает привязку по nonce
+app.post('/api/link/confirm', async (req, res) => {
+  try {
+    const initData = getInitDataFromReq(req);     // берём initData из заголовка/параметров
+    const user = getUserFromInitData(initData);   // проверка подписи Telegram, получаем {id,...}
+
+    const { nonce } = req.body || {};
+    if (!nonce) return res.status(400).json({ ok:false, error:'nonce_required' });
+
+    const q = await pool.query(`select device_id, device_name from devices where nonce = $1`, [nonce]);
+    if (!q.rowCount) return res.status(400).json({ ok:false, error:'bad_nonce' });
+
+    await pool.query(`
+      update devices
+      set user_id = $1, linked_at = now(), nonce = null, updated_at = now()
+      where nonce = $2
+    `, [user.id, nonce]);
+
+    res.json({
+      ok: true,
+      username: user.username ? '@' + user.username : ('@' + user.id),
+      device_name: q.rows[0].device_name || 'Ваше устройство'
+    });
+  } catch (e) {
+    console.error('/api/link/confirm', e);
+    res.status(401).json({ ok:false, error:'initData verification failed' });
+  }
+});
 
 
 // ===== Health
@@ -457,6 +527,49 @@ app.get('/api/me', requireNotBlocked, async (req, res) => {
     res.status(401).json({ error: 'initData verification failed' });
   }
 });
+
+
+// ===== Профиль для iOS/Android — по device_id + device_token
+app.get('/api/app/me', async (req, res) => {
+  try {
+    const { device_id, device_token } = req.query || {};
+    if (!device_id || !device_token)
+      return res.status(400).json({ ok:false, error:'device_params_required' });
+
+    const d = await pool.query(
+      `select user_id from devices where device_id = $1 and token = $2`,
+      [device_id, device_token]
+    );
+    if (!d.rowCount) return res.json({ bound:false });
+
+    const userId = d.rows[0].user_id;
+    if (!userId) return res.json({ bound:false }); // start был, но confirm ещё не прошёл
+
+    // профиль
+    const u = await pool.query(`select id, username, photo from users where id = $1`, [userId]);
+    // статус подписки
+    const s = await pool.query(`select plan, until from subscriptions where user_id = $1`, [userId]);
+    const active = s.rowCount && s.rows[0].until && new Date(s.rows[0].until) > new Date();
+
+    res.json({
+      bound: true,
+      user: {
+        id: userId,
+        username: u.rows[0]?.username || ('@' + userId),
+        photo: u.rows[0]?.photo || null
+      },
+      sub: {
+        active,
+        until: active ? s.rows[0].until : null,
+        plan: s.rows[0]?.plan || null
+      }
+    });
+  } catch (e) {
+    console.error('/api/app/me', e);
+    res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
 
 function buildVlessUri(uuid, label = 'VLESS') {
   if (!SERVER_IP || !REALITY_SNI || !REALITY_PBK || !REALITY_SID) {
