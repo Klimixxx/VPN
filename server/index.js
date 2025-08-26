@@ -582,6 +582,43 @@ app.get('/api/app/me', async (req, res) => {
   }
 });
 
+// выдать параметры для VLESS (iOS / Android клиент)
+app.get('/api/app/vless', async (req, res) => {
+  try {
+    const { device_id, device_token } = req.query;
+
+    // TODO: проверить device_id + device_token так же, как в /api/app/me
+    // TODO: проверить подписку в базе (если нет — return res.json({ active: false }))
+
+    // если всё ок и подписка активна — вернуть параметры
+    res.json({
+      active: true,
+      server: {
+        host: "vpn1.example.com",
+        port: 443,
+        sni: "cdn.cloudflare.com",
+        alpn: ["h2","http/1.1"],
+        fp: "chrome"
+      },
+      client: {
+        uuid: "11111111-2222-3333-4444-555555555555",
+        flow: "xtls-rprx-vision",
+        shortId: "abcd",
+        publicKey: "TEST_PUBLIC_KEY",
+        reality: true
+      },
+      routes: {
+        fullTunnel: true,
+        dns: ["1.1.1.1","8.8.8.8"]
+      }
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+
 
 function buildVlessUri(uuid, label = 'VLESS') {
   if (!SERVER_IP || !REALITY_SNI || !REALITY_PBK || !REALITY_SID) {
