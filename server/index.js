@@ -329,7 +329,14 @@ async function dbGetRefStats(refId) {
 
 
 // ===== CORS (для отладки — пускаем всех; позже сузишь до домена фронта)
-app.use(cors({ origin: true, credentials: false }));
+// ===== CORS (строго только с фронта miniapp)
+app.use(cors({
+  origin: ['https://ss-miniapp-frontend.vercel.app'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-init-data'],
+  credentials: false
+}));
+
 
 // ===== Конфиг VLESS REALITY из ENV
 const REALITY_SNI = process.env.REALITY_SNI;   // напр. 'www.cloudflare.com'
