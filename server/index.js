@@ -445,6 +445,8 @@ app.post('/api/link/confirm', async (req, res) => {
   try {
     const initData = getInitDataFromReq(req);     // берём initData из заголовка/параметров
     const user = getUserFromInitData(initData);   // проверка подписи Telegram, получаем {id,...}
+        // обновим username/photo в БД, чтобы iOS увидел актуальные данные
+    await dbUpsertUser(user);
 
     const { nonce } = req.body || {};
     if (!nonce) return res.status(400).json({ ok:false, error:'nonce_required' });
@@ -493,6 +495,9 @@ app.get('/api/tariffs', async (req, res) => {
 app.get('/api/me', requireNotBlocked, async (req, res) => {
   try {
     const user = getUserFromInitData(getInitDataFromReq(req));
+        // каждый заход мини-аппа освежаем username/photo
+    await dbUpsertUser(user);
+
     // Список тарифов из БД (для фронта/мини-аппа)
 
 
